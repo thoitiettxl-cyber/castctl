@@ -940,3 +940,44 @@ never FAIL, never full binary PASS.
   scratch under `/tmp/m7e-*` (no live files). Live `no.0` cookies/config
   verified unchanged at the end of every item. `/etc/hosts` restored.
   `/tmp/m7e-target` deleted after the final gate; `df -h /` verified after.
+
+## Rust E2E results — `update --apply` (item 8) with real assets (Pi, `dev-rust` `459b9fa`, 2026-11-07)
+
+M7c item 8 verified only `--dry-run`; the *apply* path (download →
+checksum → extract → replace the running executable) had never run
+against real release assets. Leg 9 of `scripts/e2e.sh` still says "a
+non-dry-run update is never run" — that is a deliberate policy for the
+harness on a **live install** and stays unchanged. This run was safe
+because each binary updated **a throwaway copy of itself** in its own
+temp directory, so the live install (`/usr/local/bin/castctl`) and the
+live profile were never in the path.
+
+Recipe (cue, one script, both binaries, Go first):
+
+```sh
+cp <binary> /tmp/upd/rs/castctl ; cp <go binary> /tmp/upd/go/castctl
+cd /tmp/upd/<side> && ./castctl update --version 0.8.0 --allow-downgrade
+```
+
+Both sides target the real GitHub release asset
+`castctl_0.8.0_linux_amd64.tar.gz` (17.4 MB) over the public network;
+both binaries are stamped, so the version gate opens.
+
+| Check | Go `0.9.0` (`1396697`) | Rust (`459b9fa`) |
+|---|---|---|
+| exit code | 0 | 0 |
+| stdout | `castctl updated: 0.9.0 -> 0.8.0 (castctl_0.8.0_linux_amd64.tar.gz)` | identical |
+| replaced file sha256 | `28ec8a798ed679c0…` | `28ec8a798ed679c0…` |
+| replaced file size | 47,946,368 B | 47,946,368 B |
+| `--version` after | `castctl 0.8.0 (d3efec4 2026-11-02T11:08:14Z)` | identical |
+| normalised stdout diff | — | **IDENTICAL** (paths + durations normalised) |
+
+Verdict: **PASS** — the Rust apply path produces a byte-identical
+result to Go's on the same asset: same message, same exit code, same
+replaced file, same reported version. Rollback-on-failure was not
+re-run here (it is covered by the crate's unit tests over fake
+binaries, `rust/castctl-update`); what this run adds is the real
+download/verify/replace leg on a running process.
+
+Both temp trees (`/tmp/upd`, `/tmp/upd-target`) were deleted after the
+run; `df -h /` verified afterwards. No secret appears in this section.
