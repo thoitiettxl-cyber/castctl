@@ -790,9 +790,7 @@ never FAIL, never full binary PASS.
   and 43/43 in 3 further isolated runs. Recorded as a flake under
   full-workspace load, not a regression.
 - `cargo clippy --workspace --all-targets -- -D warnings`: exit 0.
-- `git diff --stat`: only allowed paths — 5 files under `rust/**` (+18/−1,
-  the `cookies_file` fix) + `docs/e2e.md` (this section). No `NOTICE` /
-  `docs/provenance.md` change: no new upstream behaviour was ported.
+- `git diff --stat origin/dev-rust` at the final head: 8 files, +598/−6 — only allowed paths (`docs/e2e.md` + 7 under `rust/**`: the `cookies_file` fix +18/−1, `case_18` +31, `parity.rs` comment-only +5/−5, perf README +24). (Fix loop 1: this line quoted the pre-fix-loop 5-file snapshot; corrected to the final count. The gates in this paragraph ran at `9afa04c`, when the diff was the 5-file fix + this section.) No `NOTICE` / `docs/provenance.md` change: no new upstream behaviour was ported.
 - Disk: `df -h /` checked before each build; `/tmp/m7e-target` deleted
   after the final gate (see below).
 
@@ -829,6 +827,29 @@ never FAIL, never full binary PASS.
   the final gate; probe scratch (`/tmp/m7e-tg2*`) removed; live
   cookies/config shas re-verified unchanged
   (`aa667a83…` / `b748366c…`).
+
+### Fix-loop-1 gates (cue, `cargo +1.99.1`, `CARGO_TARGET_DIR=/tmp/m7e-fix1-target`, 2026-11-07, head `f341096` on base `acb2aa7`, no rebase — `git ls-remote origin dev-rust` still `acb2aa7` at finish)
+
+- `cargo fmt --check`: exit 0. `cargo build --workspace`: exit 0.
+  `cargo test --workspace --no-fail-fast`: exit 0 — **1600 passed,
+  0 failed** (66 suites; baseline 1599 at `acb2aa7` + 1 `case_18`; no flake
+  this run, no isolated re-runs needed).
+  `cargo clippy --workspace --all-targets -- -D warnings`: exit 0.
+- `df -h /` before: 40G free (>6G rule).
+- Harness note (void first run, recorded so it is not mistaken for a
+  regression): the first full run used a `git archive` copy (no `.git`)
+  and failed 1599/1 — `run::tests::test_update_invalid_version_no_network`
+  panicked at `castctl-cli/src/run.rs:2149` with "cannot determine running
+  version: this build was not stamped with commit and build date".
+  `rust/castctl-cli/build.rs` stamps commit/date from git and yields EMPTY
+  stamps without git metadata, so the unstamped build refuses `update`
+  before version parsing. Re-run from a full checkout copy (with `.git`,
+  head `f341096`, clean) passes 1600/0, including that test. The diff is
+  docs-only and cannot affect any test; the 1599/1 run is a transfer-method
+  artifact, not a code result.
+- `git diff --stat origin/dev-rust`: 8 files, all allowed
+  (`docs/e2e.md` + 7 under `rust/**`; docs-only delta vs `68b54f5` —
+  exact counts in the Gates scope line above).
 
 ### Rebase onto `dev-rust` `acb2aa7` (PR #85 merged) — 2026-11-06/07
 
