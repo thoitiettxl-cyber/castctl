@@ -722,7 +722,8 @@ Go REACHES the fake. Fake log: `getMe` ×1, `setMyCommands` ×1,
 `getUpdates` instantly with no sleep; probe artifact, not a Go finding);
 Go stdout: `telegram: polling for profile "muse01" (1 allowed users);
 Ctrl-C to stop` — construction succeeded on the fake's getMe 200 and
-polling ran until the 40 s `timeout` ended the run. Go therefore trusts
+polling ran until the 40 s `timeout` ended the run. The Go run's exit code
+was not separately captured; the fake log is the evidence. Go therefore trusts
 the test CA via `SSL_CERT_FILE` (system store) and honours the sing-box
 `hosts` mapping. The Go DNS leg is closable; the blocker now rests SOLELY
 on the Rust TLS-trust leg. Verbatim evidence: probe logs on cue,
@@ -835,6 +836,9 @@ never FAIL, never full binary PASS.
   0 failed** (66 suites; baseline 1599 at `acb2aa7` + 1 `case_18`; no flake
   this run, no isolated re-runs needed).
   `cargo clippy --workspace --all-targets -- -D warnings`: exit 0.
+- Round-2 re-review re-ran the full gates at final head `b1e3a5c` (full
+  checkout with `.git`): exit 0 — **1600 passed, 0 failed** (66 suites),
+  `case_18` ok.
 - `df -h /` before: 40G free (>6G rule).
 - Harness note (void first run, recorded so it is not mistaken for a
   regression): the first full run used a `git archive` copy (no `.git`)
