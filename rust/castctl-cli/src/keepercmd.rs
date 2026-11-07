@@ -795,7 +795,7 @@ async fn check_entries(
 /// `next_check_at` renders as RFC3339 UTC (see the
 /// module header: Go echoes the stored offset).
 fn print_check_row(
-    _ctx: &mut Ctx<'_>,
+    ctx: &mut Ctx<'_>,
     entry: &KeeperEntry,
     res: &TickResult,
     next_at: Option<String>,
@@ -817,11 +817,14 @@ fn print_check_row(
         o.set("state_corrupt", JsonValue::Bool(true));
     }
     let compact = encode_ordered_json(&JsonValue::Object(o)).map_err(config_err)?;
+    let text = write_json_text(&compact);
     // Go writes one row per entry inside the loop
     // (`writeJSON(env.stdout(), out)`, `keeper.go:733`), so a
     // multi-entry `keeper check` shows each row as its 90s tick
-    // finishes. Stream it instead of holding the whole run.
-    crate::run::write_live(false, &write_json_text(&compact));
+    // finishes. Stream it now and keep the buffered copy for tests
+    // (the binary skips the replay once anything streamed).
+    crate::run::write_live(false, &text);
+    ctx.out.stdout.push_str(&text);
     Ok(())
 }
 

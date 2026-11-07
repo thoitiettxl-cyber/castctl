@@ -327,6 +327,16 @@ pub(crate) fn config_err(e: ConfigError) -> FlowErr {
 /// flat file (no `profiles` marker): the runtime builder's
 /// profile resolution refuses it with exit 2, as Go's
 /// `LoadProfile` does.
+/// Set once any command has written through [`write_live`].
+static LIVE_WRITTEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this process already wrote command output straight to the
+/// real streams, so the binary must skip replaying the buffered copy
+/// that exists only for tests.
+pub fn live_output_written() -> bool {
+    LIVE_WRITTEN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Write to the real process stream right now, like Go's
 /// `fmt.Fprintf(os.Stdout, ...)` inside the keeper tick loop and the
 /// `webui serve` startup path. A long-running command must show its
@@ -336,6 +346,9 @@ pub(crate) fn config_err(e: ConfigError) -> FlowErr {
 /// Write errors are ignored, as Go ignores them on these paths.
 pub(crate) fn write_live(to_stderr: bool, text: &str) {
     use std::io::Write;
+    // Record that this process streamed: the binary must not replay
+    // the buffered copy at exit, or every line prints twice.
+    LIVE_WRITTEN.store(true, std::sync::atomic::Ordering::SeqCst);
     if to_stderr {
         let mut e = std::io::stderr();
         let _ = e.write_all(text.as_bytes());
