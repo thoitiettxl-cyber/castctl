@@ -25,7 +25,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
 use crate::checker::{CheckOutcome, Checker};
@@ -164,7 +164,7 @@ pub struct LoginResult {
     pub outcome: LoginOutcome,
     pub cookies_saved: bool,
     pub saved_names: Vec<String>,
-    pub earliest_expiry: Option<DateTime<Utc>>,
+    pub earliest_expiry: Option<DateTime<FixedOffset>>,
     pub version: BrowserVersion,
     pub duration: Duration,
     pub error: Option<KeeperError>,
@@ -182,11 +182,14 @@ pub struct AuditRecord {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::state::rfc3339::opt"
+        with = "crate::state::rfc3339_offset::opt"
     )]
-    pub earliest_expiry: Option<DateTime<Utc>>,
-    #[serde(with = "crate::state::rfc3339")]
-    pub started_at: DateTime<Utc>,
+    pub earliest_expiry: Option<DateTime<FixedOffset>>,
+    /// When the session started (LOCAL: Go
+    /// `login.go:145` `started := clock.Now()`,
+    /// `auditRecord.StartedAt`).
+    #[serde(with = "crate::state::rfc3339_offset")]
+    pub started_at: DateTime<FixedOffset>,
     pub duration_ms: i64,
 }
 
@@ -256,7 +259,7 @@ impl LoginSession {
     async fn run_inner(
         &self,
         cancel: CancelFlag,
-        started: DateTime<Utc>,
+        started: DateTime<FixedOffset>,
         session_id: &str,
         exporter: Arc<dyn Exporter>,
     ) -> LoginResult {
@@ -343,7 +346,7 @@ impl LoginSession {
     /// for a non-Done outcome.
     async fn finish(
         &self,
-        started: DateTime<Utc>,
+        started: DateTime<FixedOffset>,
         session_id: &str,
         outcome: LoginOutcome,
         runner_res: RunnerResult,
@@ -373,7 +376,7 @@ impl LoginSession {
         let audit = |final_outcome: LoginOutcome,
                      saved: bool,
                      names: Vec<String>,
-                     earliest: Option<DateTime<Utc>>| {
+                     earliest: Option<DateTime<FixedOffset>>| {
             self.write_audit(
                 &store,
                 AuditRecord {
@@ -453,7 +456,7 @@ impl LoginSession {
         }
     }
 
-    fn failed(&self, started: DateTime<Utc>, err: KeeperError) -> LoginResult {
+    fn failed(&self, started: DateTime<FixedOffset>, err: KeeperError) -> LoginResult {
         LoginResult {
             outcome: LoginOutcome::Failed,
             cookies_saved: false,
@@ -477,7 +480,7 @@ impl LoginSession {
         &self,
         store: &Store,
         session_id: &str,
-        now: DateTime<Utc>,
+        now: DateTime<FixedOffset>,
     ) -> Result<(), KeeperError> {
         let mut ls = store.lock()?;
         let st = &mut ls.state;
@@ -581,7 +584,7 @@ pub fn save_login_cookies(
     exported: &[StoredCookie],
     version: &BrowserVersion,
     clock: &dyn Clock,
-) -> Result<(Vec<String>, Option<DateTime<Utc>>), KeeperError> {
+) -> Result<(Vec<String>, Option<DateTime<FixedOffset>>), KeeperError> {
     let mut ls = store.lock()?;
     let (merged, _) = replace_with_export(&ls.cookies, exported);
     let now = clock.now();
@@ -675,7 +678,7 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let base_s = base.to_str().unwrap();
         let store = Store::new(base_s, "default", "", Duration::from_secs(5)).unwrap();
-        let clock = FakeClock::new(chrono::Utc::now());
+        let clock = FakeClock::new(chrono::Local::now().fixed_offset());
         let exported = vec![StoredCookie {
             domain: ".muse.ai".to_string(),
             path: "/".to_string(),
@@ -708,5 +711,45 @@ mod tests {
         }];
         assert!(save_login_cookies(&store, &bad, &version, &clock).is_err());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn audit_record_started_at_keeps_local_offset() {
+        // M7g: `started_at` is a LOCAL audit field (Go
+        // `login.go:145` `started := clock.Now()`); the
+        // JSONL audit line must carry the stored offset,
+        // while `earliest_expiry` in the same record stays
+        // `Z`.
+        use chrono::{FixedOffset, TimeZone};
+        let started = FixedOffset::east_opt(7 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 11, 7, 18, 33, 11)
+            .unwrap();
+        let rec = AuditRecord {
+            session_id: "login-1".to_string(),
+            profile: "no.0".to_string(),
+            outcome: "saved".to_string(),
+            cookies_saved: true,
+            saved_cookie_names: vec!["hatch_sess".to_string()],
+            earliest_expiry: Some(
+                FixedOffset::east_opt(0)
+                    .unwrap()
+                    .with_ymd_and_hms(2026, 12, 5, 0, 0, 0)
+                    .unwrap(),
+            ),
+            started_at: started,
+            duration_ms: 1000,
+        };
+        let text = serde_json::to_string(&rec).unwrap();
+        assert!(
+            text.contains("2026-11-07T18:33:11+07:00"),
+            "started_at must keep +07:00, got:\n{text}"
+        );
+        assert!(
+            text.contains("2026-12-05T00:00:00Z"),
+            "earliest_expiry must stay Z, got:\n{text}"
+        );
+        let back: AuditRecord = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.started_at, started);
     }
 }

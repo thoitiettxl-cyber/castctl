@@ -45,7 +45,7 @@ use crate::error::{
     safe_message_str,
 };
 use crate::go_decode::decode_first_value;
-use crate::keeper_status::{read_status, rfc3339 as keeper_rfc3339};
+use crate::keeper_status::{read_status, rfc3339_offset as keeper_rfc3339_offset};
 use crate::logs::{handle_get_logs, handle_logs_delete_refused, parse_query, query_value};
 use crate::merge::merge_node_at;
 use crate::plugins::handle_get_plugins;
@@ -1120,10 +1120,18 @@ fn handle_login_status(server: &Server, name: &str) -> Result<Resp, ApiError> {
     {
         logged_out = st.logged_out;
         if let Some(t) = st.earliest_expiry {
-            earliest_expiry = JsonValue::Str(keeper_rfc3339(t));
+            // Seconds-only with the stored offset (Go
+            // `handlers.go:688` `Format(time.RFC3339)`); a
+            // Go-written expiry is `Z`, a hand-edited
+            // non-`Z` offset re-prints like Go (fix loop 1,
+            // B6).
+            earliest_expiry = JsonValue::Str(keeper_rfc3339_offset(t));
         }
         if let Some(t) = st.last_checked_at {
-            last_checked_at = JsonValue::Str(keeper_rfc3339(t));
+            // LOCAL field: seconds-only with the stored
+            // offset (Go `handlers.go:691`
+            // `Format(time.RFC3339)`).
+            last_checked_at = JsonValue::Str(keeper_rfc3339_offset(t));
         }
     }
     let mut map = OrderedObject::new();

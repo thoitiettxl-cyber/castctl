@@ -29,7 +29,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{CancelFlag, Clock};
@@ -300,37 +300,41 @@ pub struct Status {
     pub keeper_stopped: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub keeper_stopped_reason: String,
+    /// Last tick time (LOCAL — copied verbatim from
+    /// state, Go `run.go:341-346`).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::state::rfc3339::opt"
+        with = "crate::state::rfc3339_offset::opt"
     )]
-    pub last_checked_at: Option<DateTime<Utc>>,
+    pub last_checked_at: Option<DateTime<FixedOffset>>,
     pub last_tick_outcome: String,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::state::rfc3339::opt"
+        with = "crate::state::rfc3339_offset::opt"
     )]
-    pub earliest_expiry: Option<DateTime<Utc>>,
+    pub earliest_expiry: Option<DateTime<FixedOffset>>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub driving_cookie: String,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::state::rfc3339::opt"
+        with = "crate::state::rfc3339_offset::opt"
     )]
-    pub driving_expiry: Option<DateTime<Utc>>,
+    pub driving_expiry: Option<DateTime<FixedOffset>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub warn_pending: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub warn_sent: bool,
+    /// Next scheduled check (LOCAL — copied verbatim
+    /// from state).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::state::rfc3339::opt"
+        with = "crate::state::rfc3339_offset::opt"
     )]
-    pub next_check_at: Option<DateTime<Utc>>,
+    pub next_check_at: Option<DateTime<FixedOffset>>,
     /// A corrupt or unknown-version state file: status
     /// still reports (with the `state_corrupt` reason)
     /// instead of erroring; the remedy is to delete
@@ -552,7 +556,7 @@ mod tests {
 
         struct PanickingClock;
         impl Clock for PanickingClock {
-            fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            fn now(&self) -> chrono::DateTime<chrono::FixedOffset> {
                 panic!("panicking test clock");
             }
             fn sleep(
@@ -646,6 +650,41 @@ mod tests {
         let _f2 = acquire_single_flight(dir, "no.0", clock.clone())
             .await
             .expect("re-claim after release");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn read_status_keeps_go_written_offsets() {
+        // M7g: `keeper status` renders the state file's
+        // stored offsets (Go `ReadStatus` copies state
+        // verbatim, `run.go:341-346`): LOCAL fields at
+        // `+07:00`, expiry fields at `Z`.
+        let base = std::env::temp_dir().join(format!(
+            "castctl-keeper-status-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("profiles").join("no.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("session-state.json"),
+            b"{\"version\":1,\"last_tick_outcome\":\"ok\",\"last_checked_at\":\"2026-11-07T18:33:11.890775586+07:00\",\"next_check_at\":\"2026-11-07T18:33:11.890775586+07:00\",\"earliest_expiry\":\"2026-12-05T00:00:00Z\",\"driving_expiry\":\"2026-12-05T00:00:00Z\"}",
+        )
+        .unwrap();
+        let st = read_status(base.to_str().unwrap(), "k", "no.0").expect("reads");
+        let text = serde_json::to_string(&st).expect("serializes");
+        assert!(
+            text.contains("2026-11-07T18:33:11.890775586+07:00"),
+            "last/next_check_at must keep +07:00, got:\n{text}"
+        );
+        assert!(
+            text.contains("2026-12-05T00:00:00Z"),
+            "expiry fields must stay Z, got:\n{text}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -34,7 +34,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
@@ -95,55 +95,218 @@ where
     Ok(opt.unwrap_or_default())
 }
 
-/// RFC 3339 serde for `DateTime<Utc>` / `Option<DateTime<Utc>>`
-/// (chrono has no `serde` feature enabled in this workspace,
-/// so the impl is hand-written; the wire form is Go
-/// `time.Time` JSON: RFC 3339 with nanoseconds).
-pub mod rfc3339 {
-    use chrono::{DateTime, Utc};
+/// RFC 3339 serde for `DateTime<FixedOffset>` /
+/// `Option<DateTime<FixedOffset>>` — Go `time.Time` JSON
+/// semantics for every keeper time, LOCAL-origin or expiry
+/// (`last/next_check_at`, `login_*`, `warned_at`,
+/// `last_seen`, audit `started_at`, and the expiry fields
+/// `expires_at` / `earliest_expiry` / `driving_expiry` —
+/// fix loop 1, B6: expiry fields use this module too, so
+/// a stored non-`Z` offset is preserved on re-print like
+/// Go; values constructed from UTC instants still render
+/// `Z`).
+///
+/// The stored offset is preserved: parse keeps it
+/// (`DateTime<FixedOffset>`), serialize re-emits it via
+/// the shared `castctl_shared::timefmt::format_go_rfc3339_nano`
+/// (Go RFC3339Nano: trailing-zero nanos trimmed, `Z` for
+/// a zero offset). Go normalises an input `+00:00` to `Z`
+/// on output, and so does this module (the zero offset has
+/// no other spelling in chrono). A timestamp with no offset,
+/// or an offset hour out of range, fails to parse — like Go,
+/// the state file is then corrupt.
+///
+/// Two Go behaviours need explicit code because chrono's
+/// `parse_rfc3339` differs (verified against chrono
+/// 0.4.45 source + Go 1.27.3 probes, 2026-11-07):
+/// - Go accepts an out-of-range offset MINUTES of exactly
+///   60 and carries it (`+07:60` -> `+08:00`, wall clock
+///   preserved; `-07:60` -> `-08:00`); 61–99 are rejected
+///   ("offset minute out of range"). Chrono rejects all
+///   of them. `normalize_offset_minutes` rewrites only
+///   `:60` first (fix loop 1, B2).
+/// - Go rejects spellings chrono accepts (lowercase
+///   `t`/`z`, space separator, leap second `:60`,
+///   non-ASCII minus U+2212, `+0700` with no colon,
+///   trailing text after the offset, surrounding
+///   whitespace); `check_go_strict` rejects those before
+///   chrono sees them (fix loop 1, B3+B4).
+pub mod rfc3339_offset {
+    use chrono::{DateTime, FixedOffset};
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S>(v: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>
+    /// Re-write a trailing RFC 3339 offset whose minutes
+    /// are out of range the way Go's `time.Parse` does:
+    /// the minutes carry into the hour, the wall clock is
+    /// preserved (`+07:60` -> `+08:00`). ONLY `mm == 60`
+    /// carries — Go rejects 61–99 ("time zone offset
+    /// minute out of range"), so those are left for the
+    /// parser to reject (fix loop 1, B2). Inputs that need
+    /// no rewrite are returned unchanged. A rewrite that
+    /// lands on `±24:00` is left for the parser to reject:
+    /// chrono cannot represent a 24h offset, and Go —
+    /// while it accepts such a value on unmarshal — cannot
+    /// marshal it back (`timezone hour outside of range
+    /// [0,23]`), so no round-trip is lost (see PORTING.md
+    /// §M7g).
+    fn normalize_offset_minutes(s: &str) -> String {
+        let Some(t) = s.find('T') else {
+            return s.to_string();
+        };
+        let rest = &s[t + 1..];
+        let Some(sign_pos) = rest.rfind(['+', '-']) else {
+            return s.to_string();
+        };
+        let off = &rest[sign_pos..];
+        let b = off.as_bytes();
+        if b.len() != 6
+            || b[3] != b':'
+            || !b[1].is_ascii_digit()
+            || !b[2].is_ascii_digit()
+            || !b[4].is_ascii_digit()
+            || !b[5].is_ascii_digit()
+        {
+            return s.to_string();
+        }
+        let hh = (b[1] - b'0') as u32 * 10 + (b[2] - b'0') as u32;
+        let mm = (b[4] - b'0') as u32 * 10 + (b[5] - b'0') as u32;
+        if mm != 60 {
+            return s.to_string();
+        }
+        let total = hh * 60 + mm;
+        format!(
+            "{}{:02}:{:02}",
+            &s[..t + 1 + sign_pos + 1],
+            total / 60,
+            total % 60
+        )
+    }
+
+    /// Reject the spellings Go's `time.Parse` (RFC3339
+    /// layout) rejects but chrono's `parse_rfc3339`
+    /// accepts. Everything else is left to chrono, whose
+    /// remaining checks (digits, ranges, offset within
+    /// ±23:59) match Go's probed behaviour. The offset
+    /// must be exactly `Z` or `±HH:MM` and then
+    /// end-of-input (fix loop 1, B3+B4): `+0700` (no
+    /// colon), trailing text after the offset (`:30`),
+    /// and leading/trailing whitespace are all rejected,
+    /// like Go.
+    fn check_go_strict(s: &str) -> Result<(), String> {
+        // Go rejects surrounding whitespace (`extra text`
+        // / `cannot parse … as "2006"`); chrono tolerates
+        // it.
+        if s.starts_with(|c: char| c.is_ascii_whitespace())
+            || s.ends_with(|c: char| c.is_ascii_whitespace())
+        {
+            return Err("timestamp has surrounding whitespace".to_string());
+        }
+        let b = s.as_bytes();
+        // Go's RFC3339 layout needs at least
+        // `2006-01-02T15:04:05Z` (20 bytes).
+        if b.len() < 20 {
+            return Err("timestamp too short for RFC3339".to_string());
+        }
+        // Separator must be an uppercase `T` (chrono also
+        // accepts `t` and ` `; Go rejects both).
+        if b[10] != b'T' {
+            return Err("date/time separator must be 'T'".to_string());
+        }
+        // No leap second: chrono maps `:60` to `:59` + 1s,
+        // Go rejects it.
+        if b[17] == b'6' && b[18] == b'0' {
+            return Err("leap second ':60' is not valid RFC3339 for Go".to_string());
+        }
+        // Offset introducer must be `Z` (uppercase), `+`
+        // or `-` (ASCII): chrono also accepts `z` and the
+        // non-ASCII minus U+2212; Go rejects both.
+        let mut i = 19;
+        if b[i] == b'.' {
+            i += 1;
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i == start {
+                return Err("'.' must be followed by fractional digits".to_string());
+            }
+        }
+        match b.get(i) {
+            Some(b'Z') => {
+                // `Z` must be the last byte.
+                if i + 1 == b.len() {
+                    Ok(())
+                } else {
+                    Err("unexpected text after 'Z'".to_string())
+                }
+            }
+            Some(b'+') | Some(b'-') => {
+                // `±HH:MM` (two digits, colon, two digits)
+                // and then end-of-input.
+                let rest = &b[i..];
+                if rest.len() != 6
+                    || rest[3] != b':'
+                    || !rest[1].is_ascii_digit()
+                    || !rest[2].is_ascii_digit()
+                    || !rest[4].is_ascii_digit()
+                    || !rest[5].is_ascii_digit()
+                {
+                    return Err("offset must be ±HH:MM".to_string());
+                }
+                Ok(())
+            }
+            _ => Err("missing or invalid RFC3339 offset".to_string()),
+        }
+    }
+
+    /// Parse one RFC 3339 timestamp with Go's `time.Time`
+    /// accept-set. The `String` error is surfaced verbatim
+    /// by the serde error (and by the webui mirror in
+    /// `castctl-webui/src/keeper_status.rs`, which must
+    /// stay in sync with this function).
+    fn parse(s: &str) -> Result<DateTime<FixedOffset>, String> {
+        check_go_strict(s)?;
+        let s = normalize_offset_minutes(s);
+        s.parse::<DateTime<FixedOffset>>()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn serialize<S>(v: &DateTime<FixedOffset>, s: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        s.serialize_str(&v.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+        s.serialize_str(&castctl_shared::timefmt::format_go_rfc3339_nano(v))
     }
 
-    pub fn deserialize<'de, D>(d: D) -> Result<DateTime<Utc>, D::Error>
+    pub fn deserialize<'de, D>(d: D) -> Result<DateTime<FixedOffset>, D::Error>
     where
         D: Deserializer<'de>,
     {
         let s = String::deserialize(d)?;
-        s.parse::<DateTime<Utc>>().map_err(serde::de::Error::custom)
+        parse(&s).map_err(serde::de::Error::custom)
     }
 
     pub mod opt {
-        use chrono::{DateTime, Utc};
+        use chrono::{DateTime, FixedOffset};
         use serde::{Deserialize, Deserializer, Serializer};
 
-        pub fn serialize<S>(v: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error>
+        pub fn serialize<S>(v: &Option<DateTime<FixedOffset>>, s: S) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
         {
             match v {
-                Some(v) => {
-                    s.serialize_some(&v.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
-                }
+                Some(v) => s.serialize_some(&castctl_shared::timefmt::format_go_rfc3339_nano(v)),
                 None => s.serialize_none(),
             }
         }
 
-        pub fn deserialize<'de, D>(d: D) -> Result<Option<DateTime<Utc>>, D::Error>
+        pub fn deserialize<'de, D>(d: D) -> Result<Option<DateTime<FixedOffset>>, D::Error>
         where
             D: Deserializer<'de>,
         {
             let opt = Option::<String>::deserialize(d)?;
             match opt {
-                Some(s) => s
-                    .parse::<DateTime<Utc>>()
-                    .map(Some)
-                    .map_err(serde::de::Error::custom),
+                Some(s) => super::parse(&s).map(Some).map_err(serde::de::Error::custom),
                 None => Ok(None),
             }
         }
@@ -158,14 +321,15 @@ pub struct CookieState {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "rfc3339::opt"
+        with = "rfc3339_offset::opt"
     )]
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<FixedOffset>>,
     /// Session cookie (no expiry).
     pub session: bool,
-    /// Last time this cookie was seen.
-    #[serde(with = "rfc3339")]
-    pub last_seen: DateTime<Utc>,
+    /// Last time this cookie was seen (LOCAL: Go
+    /// `state.go:342` `LastSeen: now`, `clock.Now()`).
+    #[serde(with = "rfc3339_offset")]
+    pub last_seen: DateTime<FixedOffset>,
 }
 
 /// One per-kind dedup record (`state.go:167-171`).
@@ -174,13 +338,14 @@ pub struct WarnedKind {
     /// Whether the notice for this kind was sent during the
     /// current episode.
     pub sent: bool,
-    /// When it was sent.
+    /// When it was sent (LOCAL: Go `state.go:193`
+    /// `MarkWarnSent`, `clock.Now()`).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "rfc3339::opt"
+        with = "rfc3339_offset::opt"
     )]
-    pub at: Option<DateTime<Utc>>,
+    pub at: Option<DateTime<FixedOffset>>,
 }
 
 /// The v1 state file body (`state.go:91-165`). Field order
@@ -199,13 +364,14 @@ pub struct SessionState {
     /// Why the entry stopped (closed enum).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub keeper_stopped_reason: String,
-    /// Last tick time.
+    /// Last tick time (LOCAL: Go tick paths,
+    /// `clock.Now()`).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "rfc3339::opt"
+        with = "rfc3339_offset::opt"
     )]
-    pub last_checked_at: Option<DateTime<Utc>>,
+    pub last_checked_at: Option<DateTime<FixedOffset>>,
     /// Last tick outcome (closed enum; never `"error"`).
     #[serde(default)]
     pub last_tick_outcome: String,
@@ -224,9 +390,9 @@ pub struct SessionState {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "rfc3339::opt"
+        with = "rfc3339_offset::opt"
     )]
-    pub earliest_expiry: Option<DateTime<Utc>>,
+    pub earliest_expiry: Option<DateTime<FixedOffset>>,
     /// Name of the driving cookie.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub driving_cookie: String,
@@ -234,46 +400,51 @@ pub struct SessionState {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "rfc3339::opt"
+        with = "rfc3339_offset::opt"
     )]
-    pub driving_expiry: Option<DateTime<Utc>>,
+    pub driving_expiry: Option<DateTime<FixedOffset>>,
     /// SHA-256 of the cookies file (change detection; never
     /// logged).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cookies_sha256: String,
-    /// Next scheduled check.
+    /// Next scheduled check (LOCAL: Go tick paths,
+    /// `clock.Now().Add(...)`).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "rfc3339::opt"
+        with = "rfc3339_offset::opt"
     )]
-    pub next_check_at: Option<DateTime<Utc>>,
+    pub next_check_at: Option<DateTime<FixedOffset>>,
     /// A screencast login is in progress for this profile.
     #[serde(default, skip_serializing_if = "is_false")]
     pub login_active: bool,
     /// The login session's opaque id (not a secret).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub login_session_id: String,
-    /// When the login started (bounds the pause).
+    /// When the login started (bounds the pause)
+    /// (LOCAL: Go `login.go:401` `LoginStartedAt = &now`,
+    /// `clock.Now()`).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "rfc3339::opt"
+        with = "rfc3339_offset::opt"
     )]
-    pub login_started_at: Option<DateTime<Utc>>,
+    pub login_started_at: Option<DateTime<FixedOffset>>,
     /// Login provenance, written ONLY by the login flow.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub login_user_agent: String,
     /// Login provenance (browser product string).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub login_chromium_version: String,
-    /// When the login saved cookies.
+    /// When the login saved cookies (LOCAL: Go
+    /// `login.go:343-344` `LoginAt = &loginAt`,
+    /// `clock.Now()`).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "rfc3339::opt"
+        with = "rfc3339_offset::opt"
     )]
-    pub login_at: Option<DateTime<Utc>>,
+    pub login_at: Option<DateTime<FixedOffset>>,
     /// Legacy warn-once fields (kept in sync with
     /// `warned_kinds` for existing readers).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -284,13 +455,14 @@ pub struct SessionState {
     /// A notice was sent for the current episode.
     #[serde(default, skip_serializing_if = "is_false")]
     pub warn_sent: bool,
-    /// When the last notice was sent.
+    /// When the last notice was sent (LOCAL: Go
+    /// `state.go:194` `MarkWarnSent`, `clock.Now()`).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "rfc3339::opt"
+        with = "rfc3339_offset::opt"
     )]
-    pub warned_at: Option<DateTime<Utc>>,
+    pub warned_at: Option<DateTime<FixedOffset>>,
     /// Per-(incident, kind) dedup record: the
     /// episode-scoped authority.
     #[serde(
@@ -353,7 +525,7 @@ impl SessionState {
     /// (`false` = already alerted, caller must not
     /// re-notify). The legacy `warn_*` fields are kept in
     /// sync (`state.go:185-203`).
-    pub fn mark_warn_pending(&mut self, kind: NoticeKind, _now: DateTime<Utc>) -> bool {
+    pub fn mark_warn_pending(&mut self, kind: NoticeKind, _now: DateTime<FixedOffset>) -> bool {
         if self.warned_kind_sent(kind) {
             return false;
         }
@@ -374,7 +546,7 @@ impl SessionState {
     /// dedup entry flips to `sent` and the legacy fields
     /// sync. Other kinds' entries are untouched
     /// (`state.go:205-217`).
-    pub fn mark_warn_sent(&mut self, kind: NoticeKind, now: DateTime<Utc>) {
+    pub fn mark_warn_sent(&mut self, kind: NoticeKind, now: DateTime<FixedOffset>) {
         self.mark_warn_sent_raw(kind.as_str(), now);
     }
 
@@ -390,7 +562,7 @@ impl SessionState {
     /// unknown kind via its `NoticeText` default branch),
     /// but the stored `warn_kind` is NOT rewritten to
     /// `"logged_out"` (S-8).
-    pub fn mark_warn_sent_raw(&mut self, raw: &str, now: DateTime<Utc>) {
+    pub fn mark_warn_sent_raw(&mut self, raw: &str, now: DateTime<FixedOffset>) {
         self.warned_kinds.insert(
             raw.to_string(),
             WarnedKind {
@@ -419,7 +591,7 @@ impl SessionState {
     /// names and expiry dates only, `last_seen = now` for
     /// every cookie present. Cookies absent from the set are
     /// dropped (`state.go:337-353`).
-    pub fn refresh_cookie_records(&mut self, cookies: &[StoredCookie], now: DateTime<Utc>) {
+    pub fn refresh_cookie_records(&mut self, cookies: &[StoredCookie], now: DateTime<FixedOffset>) {
         let mut map: BTreeMap<String, CookieState> = BTreeMap::new();
         for c in cookies {
             let rec = CookieState {
@@ -554,7 +726,11 @@ mod tests {
         st.last_tick_outcome = OUTCOME_OK.to_string();
         st.keeper_stopped = true;
         st.keeper_stopped_reason = STOPPED_AUTH_ERROR.to_string();
-        st.mark_warn_pending(NoticeKind::LoggedOut, Utc::now());
+        let now = FixedOffset::east_opt(7 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 11, 5, 0, 0, 0)
+            .unwrap();
+        st.mark_warn_pending(NoticeKind::LoggedOut, now);
         save_state(dir.to_str().unwrap(), &st).expect("saves");
         let mode = std::fs::metadata(state_path(dir.to_str().unwrap()))
             .unwrap()
@@ -623,7 +799,10 @@ mod tests {
         // S-8: a hand-edited state with an unknown kind
         // keeps the raw kind in bookkeeping instead of
         // being rewritten to "logged_out".
-        let now = Utc.with_ymd_and_hms(2026, 11, 5, 0, 0, 0).unwrap();
+        let now = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 11, 5, 0, 0, 0)
+            .unwrap();
         let mut st = SessionState::new();
         st.mark_warn_sent_raw("bogus_kind", now);
         assert_eq!(st.warn_kind, "bogus_kind");
@@ -634,7 +813,10 @@ mod tests {
 
     #[test]
     fn warn_dedup_episode() {
-        let now = Utc.with_ymd_and_hms(2026, 11, 5, 0, 0, 0).unwrap();
+        let now = FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 11, 5, 0, 0, 0)
+            .unwrap();
         let mut st = SessionState::new();
         assert!(st.mark_warn_pending(NoticeKind::Captcha, now));
         // Go `state.go:168-180`: a repeat pending for the same
@@ -657,5 +839,460 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    fn write_raw_state(dir: &Path, json: &str) {
+        std::fs::write(state_path(dir.to_str().unwrap()), json.as_bytes()).unwrap();
+    }
+
+    fn saved_state_text(dir: &Path) -> String {
+        std::fs::read_to_string(state_path(dir.to_str().unwrap())).unwrap()
+    }
+
+    #[test]
+    fn local_offset_round_trip_preserves_stored_offset() {
+        // M7g: Go `time.Time` JSON keeps the stored offset
+        // (R1 probe P1, re-verified by the writer 2026-11-07
+        // with sandbox go1.27.3): `+07:00`, `Z` and `-03:00`
+        // re-print byte-identical. Expected values are the
+        // literal Go-probe outputs, never recomputed.
+        for input in [
+            "2026-11-07T18:33:11.890775586+07:00",
+            "2026-11-07T11:33:15.063157834Z",
+            "2026-11-07T08:33:15.063157834-03:00",
+        ] {
+            let dir = tmpdir();
+            write_raw_state(
+                &dir,
+                &format!(
+                    "{{\"version\":1,\"last_checked_at\":\"{input}\",\"next_check_at\":\"{input}\"}}"
+                ),
+            );
+            let st = load_state(dir.to_str().unwrap()).expect("loads");
+            save_state(dir.to_str().unwrap(), &st).expect("saves");
+            let text = saved_state_text(&dir);
+            assert!(
+                text.contains(input),
+                "re-print of {input} should contain {input} verbatim, got:\n{text}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn plus_zero_zero_collapses_to_z_like_go() {
+        // Go normalises input `+00:00` to `Z` on output
+        // (R1 probe P2, re-verified by the writer).
+        let dir = tmpdir();
+        write_raw_state(
+            &dir,
+            "{\"version\":1,\"next_check_at\":\"2026-11-07T11:33:11+00:00\"}",
+        );
+        let st = load_state(dir.to_str().unwrap()).expect("loads");
+        save_state(dir.to_str().unwrap(), &st).expect("saves");
+        assert!(
+            saved_state_text(&dir).contains("2026-11-07T11:33:11Z"),
+            "got:\n{}",
+            saved_state_text(&dir)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offset_minutes_carry_like_go() {
+        // Go accepts `+07:60` and normalises it to `+08:00`
+        // with the wall clock preserved (writer re-probe
+        // 2026-11-07, sandbox go1.27.3, run twice:
+        // `2026-11-07T18:33:11+07:60` ->
+        // `"2026-11-07T18:33:11+08:00"`; R1's recorded
+        // `08:33:11` is a transcription error).
+        let dir = tmpdir();
+        write_raw_state(
+            &dir,
+            "{\"version\":1,\"next_check_at\":\"2026-11-07T18:33:11+07:60\"}",
+        );
+        let st = load_state(dir.to_str().unwrap()).expect("loads");
+        save_state(dir.to_str().unwrap(), &st).expect("saves");
+        assert!(
+            saved_state_text(&dir).contains("2026-11-07T18:33:11+08:00"),
+            "got:\n{}",
+            saved_state_text(&dir)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn time_without_offset_is_corrupt() {
+        // Go rejects a timestamp with no offset outright
+        // (R1 probe P5).
+        let dir = tmpdir();
+        write_raw_state(
+            &dir,
+            "{\"version\":1,\"next_check_at\":\"2026-11-07T18:33:11\"}",
+        );
+        assert!(matches!(
+            load_state(dir.to_str().unwrap()),
+            Err(KeeperError::StateCorrupt(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offset_hour_out_of_range_is_corrupt() {
+        // Go rejects `+99:00` (R1 probe P4).
+        let dir = tmpdir();
+        write_raw_state(
+            &dir,
+            "{\"version\":1,\"next_check_at\":\"2026-11-07T18:33:11.5+99:00\"}",
+        );
+        assert!(matches!(
+            load_state(dir.to_str().unwrap()),
+            Err(KeeperError::StateCorrupt(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn state_write_carries_local_offset() {
+        // M7g: a state written from a `+07:00` clock
+        // carries the local offset on disk (Go `time.Now()`
+        // marshal), not `+00:00`/`Z`. The instant is the
+        // fixed Go-probe value
+        // `2026-11-07T18:33:11.890775586+07:00`.
+        use crate::clock::{Clock, FakeClock};
+        use chrono::Timelike;
+        let dir = tmpdir();
+        let clock = FakeClock::new(
+            FixedOffset::east_opt(7 * 3600)
+                .unwrap()
+                .with_ymd_and_hms(2026, 11, 7, 18, 33, 11)
+                .unwrap()
+                .with_nanosecond(890_775_586)
+                .unwrap(),
+        );
+        let now = clock.now();
+        let mut st = SessionState::new();
+        st.last_checked_at = Some(now);
+        st.next_check_at = Some(now);
+        save_state(dir.to_str().unwrap(), &st).expect("saves");
+        let text = saved_state_text(&dir);
+        assert!(
+            text.contains("2026-11-07T18:33:11.890775586+07:00"),
+            "state write must carry +07:00, got:\n{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn go_strict_spellings_are_corrupt() {
+        // M7g: chrono accepts spellings Go's `time.Parse`
+        // rejects — lowercase `t`/`z`, space separator,
+        // leap second `:60`, non-ASCII minus U+2212. Each
+        // must fail the load like Go (probed with Go
+        // 1.27.3, 2026-11-07).
+        for bad in [
+            "2026-11-07t18:33:11+07:00",
+            "2026-11-07T18:33:11z",
+            "2026-11-07 18:33:11+07:00",
+            "2026-11-07T18:33:60+07:00",
+            "2026-11-07T18:33:11\u{2212}07:00",
+        ] {
+            let dir = tmpdir();
+            write_raw_state(
+                &dir,
+                &format!("{{\"version\":1,\"next_check_at\":\"{bad}\"}}"),
+            );
+            assert!(
+                matches!(
+                    load_state(dir.to_str().unwrap()),
+                    Err(KeeperError::StateCorrupt(_))
+                ),
+                "{bad} must be corrupt"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn offset_24h_is_corrupt() {
+        // M7g: `+23:60` / `+24:00` normalise to a 24h
+        // offset, which chrono cannot represent — and Go
+        // cannot marshal back (`timezone hour outside of
+        // range [0,23]`), so rejecting at load loses no
+        // round-trip (see PORTING.md §M7g).
+        for bad in ["2026-11-07T18:33:11+23:60", "2026-11-07T18:33:11+24:00"] {
+            let dir = tmpdir();
+            write_raw_state(
+                &dir,
+                &format!("{{\"version\":1,\"next_check_at\":\"{bad}\"}}"),
+            );
+            assert!(
+                matches!(
+                    load_state(dir.to_str().unwrap()),
+                    Err(KeeperError::StateCorrupt(_))
+                ),
+                "{bad} must be corrupt"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn expiry_fields_stay_utc() {
+        // Go writes `expires_at` / `earliest_expiry` /
+        // `driving_expiry` from `time.Unix(...).UTC()` —
+        // always `Z` (R1 §2a) — while a LOCAL field in the
+        // same file keeps its offset.
+        let dir = tmpdir();
+        write_raw_state(
+            &dir,
+            "{\"version\":1,\"earliest_expiry\":\"2026-12-05T00:00:00Z\",\"driving_expiry\":\"2026-12-05T00:00:00Z\",\"cookies\":{\"hatch_sess\":{\"expires_at\":\"2026-12-05T00:00:00Z\",\"session\":false,\"last_seen\":\"2026-11-07T18:33:11+07:00\"}}}",
+        );
+        let st = load_state(dir.to_str().unwrap()).expect("loads");
+        save_state(dir.to_str().unwrap(), &st).expect("saves");
+        let text = saved_state_text(&dir);
+        assert!(
+            text.contains("2026-12-05T00:00:00Z"),
+            "expiry fields must stay Z, got:\n{text}"
+        );
+        assert!(
+            !text.contains("+00:00"),
+            "no expiry field may render +00:00, got:\n{text}"
+        );
+        assert!(
+            text.contains("2026-11-07T18:33:11+07:00"),
+            "last_seen must keep its local offset, got:\n{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn go_rfc3339_nano_trims_trailing_zeros_like_go() {
+        // Fix loop 1, B1: Go RFC3339Nano trims ALL
+        // trailing zeros (`.5`, `.12`, `.1234`,
+        // `.12345678`); chrono `AutoSi` prints 3/6/9
+        // digits only (`.500`, `.120`, `.123400`,
+        // `.123456780`). Expected values are the literal
+        // Go 1.27.3 probe outputs (review1-technical
+        // §Probes), never recomputed with the code under
+        // test.
+        for (input, expected) in [
+            (
+                "2026-11-07T18:33:11.500000000+07:00",
+                "2026-11-07T18:33:11.5+07:00",
+            ),
+            (
+                "2026-11-07T18:33:11.100000000+07:00",
+                "2026-11-07T18:33:11.1+07:00",
+            ),
+            (
+                "2026-11-07T18:33:11.120000000+07:00",
+                "2026-11-07T18:33:11.12+07:00",
+            ),
+            (
+                "2026-11-07T18:33:11.123400000+07:00",
+                "2026-11-07T18:33:11.1234+07:00",
+            ),
+            (
+                "2026-11-07T18:33:11.123456780+07:00",
+                "2026-11-07T18:33:11.12345678+07:00",
+            ),
+            (
+                "2026-11-07T18:33:11.000000010+07:00",
+                "2026-11-07T18:33:11.00000001+07:00",
+            ),
+            (
+                "2026-11-07T18:33:11.123000000+07:00",
+                "2026-11-07T18:33:11.123+07:00",
+            ),
+            (
+                "2026-11-07T18:33:11.123456000+07:00",
+                "2026-11-07T18:33:11.123456+07:00",
+            ),
+            (
+                "2026-11-07T18:33:11.000000001Z",
+                "2026-11-07T18:33:11.000000001Z",
+            ),
+            ("2026-11-07T18:33:11.500000000Z", "2026-11-07T18:33:11.5Z"),
+        ] {
+            let dir = tmpdir();
+            write_raw_state(
+                &dir,
+                &format!("{{\"version\":1,\"next_check_at\":\"{input}\"}}"),
+            );
+            let st = load_state(dir.to_str().unwrap()).expect("loads");
+            save_state(dir.to_str().unwrap(), &st).expect("saves");
+            let text = saved_state_text(&dir);
+            assert!(
+                text.contains(expected),
+                "re-print of {input} should contain {expected}, got:\n{text}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn state_write_trims_trailing_zeros_like_go() {
+        // Fix loop 1, B1 (write side): a fake clock at
+        // nanos 120000000 writes `.12`, not `.120`
+        // (Go re-marshal of the same instant).
+        use crate::clock::{Clock, FakeClock};
+        use chrono::Timelike;
+        let dir = tmpdir();
+        let clock = FakeClock::new(
+            FixedOffset::east_opt(7 * 3600)
+                .unwrap()
+                .with_ymd_and_hms(2026, 11, 7, 18, 33, 11)
+                .unwrap()
+                .with_nanosecond(120_000_000)
+                .unwrap(),
+        );
+        let mut st = SessionState::new();
+        st.last_checked_at = Some(clock.now());
+        st.next_check_at = Some(clock.now());
+        save_state(dir.to_str().unwrap(), &st).expect("saves");
+        let text = saved_state_text(&dir);
+        assert!(
+            text.contains("2026-11-07T18:33:11.12+07:00"),
+            "state write must render .12 like Go, got:\n{text}"
+        );
+        assert!(
+            !text.contains(".120+07:00"),
+            "state write must not render .120, got:\n{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offset_minutes_61_to_99_are_corrupt() {
+        // Fix loop 1, B2: Go rejects offset minutes 61–99
+        // ("time zone offset minute out of range"); only
+        // mm==60 carries (`+07:60` -> `+08:00`).
+        for bad in [
+            "2026-11-07T18:33:11+07:61",
+            "2026-11-07T18:33:11+07:75",
+            "2026-11-07T18:33:11+07:99",
+            "2026-11-07T18:33:11-07:61",
+        ] {
+            let dir = tmpdir();
+            write_raw_state(
+                &dir,
+                &format!("{{\"version\":1,\"next_check_at\":\"{bad}\"}}"),
+            );
+            assert!(
+                matches!(
+                    load_state(dir.to_str().unwrap()),
+                    Err(KeeperError::StateCorrupt(_))
+                ),
+                "{bad} must be corrupt"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn go_strict_offset_shape_and_end_of_input_are_corrupt() {
+        // Fix loop 1, B3+B4: the offset must be exactly `Z`
+        // or `±HH:MM` and then end-of-input. Go rejects
+        // `+0700` (no colon), trailing text after the
+        // offset, and surrounding whitespace — all of which
+        // chrono's parser tolerates.
+        for bad in [
+            "2026-11-07T18:33:11+0700",
+            "2026-11-07T18:33:11+07:00 ",
+            " 2026-11-07T18:33:11+07:00",
+            "2026-11-07T18:33:11+07:00:30",
+            "2026-11-07T18:33:11Z ",
+            // `\n` / `\t` arrive as JSON escapes and decode
+            // to real whitespace before the time parser.
+            "2026-11-07T18:33:11+07:00\\n",
+            "2026-11-07T18:33:11+07:00\\t",
+        ] {
+            let dir = tmpdir();
+            write_raw_state(
+                &dir,
+                &format!("{{\"version\":1,\"next_check_at\":\"{bad}\"}}"),
+            );
+            assert!(
+                matches!(
+                    load_state(dir.to_str().unwrap()),
+                    Err(KeeperError::StateCorrupt(_))
+                ),
+                "{bad:?} must be corrupt"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn expiry_fields_preserve_stored_offset_like_go() {
+        // Fix loop 1, B6: Go's `time.Time` keeps the
+        // stored offset on unmarshal for expiry fields
+        // too — a hand-edited `+07:00` expiry re-prints
+        // `+07:00` in Go, not `Z`.
+        let dir = tmpdir();
+        write_raw_state(
+            &dir,
+            "{\"version\":1,\"earliest_expiry\":\"2026-12-05T07:00:00+07:00\",\"driving_expiry\":\"2026-12-05T07:00:00+07:00\",\"cookies\":{\"hatch_sess\":{\"expires_at\":\"2026-12-05T07:00:00+07:00\",\"session\":false,\"last_seen\":\"2026-11-07T18:33:11+07:00\"}}}",
+        );
+        let st = load_state(dir.to_str().unwrap()).expect("loads");
+        save_state(dir.to_str().unwrap(), &st).expect("saves");
+        let text = saved_state_text(&dir);
+        assert!(
+            text.contains("2026-12-05T07:00:00+07:00"),
+            "expiry fields must keep the stored +07:00, got:\n{text}"
+        );
+        assert!(
+            !text.contains("2026-12-05T00:00:00Z"),
+            "the same instant must not be re-printed as Z, got:\n{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn expiry_strict_spellings_match_go() {
+        // Fix loop 1, B6: the legacy Utc module's
+        // accept-set differs from Go's for expiry fields —
+        // lowercase `z` is accepted (Go rejects),
+        // `+07:60` is rejected (Go accepts -> `+08:00`),
+        // and `.5` renders `.500Z` (Go renders `.5Z`).
+        let dir = tmpdir();
+        write_raw_state(
+            &dir,
+            "{\"version\":1,\"earliest_expiry\":\"2026-12-05T00:00:00z\"}",
+        );
+        assert!(
+            matches!(
+                load_state(dir.to_str().unwrap()),
+                Err(KeeperError::StateCorrupt(_))
+            ),
+            "lowercase z expiry must be corrupt"
+        );
+        let dir = tmpdir();
+        write_raw_state(
+            &dir,
+            "{\"version\":1,\"earliest_expiry\":\"2026-12-05T00:00:00+07:60\"}",
+        );
+        let st = load_state(dir.to_str().unwrap()).expect("loads +07:60 expiry");
+        save_state(dir.to_str().unwrap(), &st).expect("saves");
+        assert!(
+            saved_state_text(&dir).contains("2026-12-05T00:00:00+08:00"),
+            "+07:60 expiry must carry to +08:00, got:\n{}",
+            saved_state_text(&dir)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let dir = tmpdir();
+        write_raw_state(
+            &dir,
+            "{\"version\":1,\"earliest_expiry\":\"2026-12-05T00:00:00.5Z\"}",
+        );
+        let st = load_state(dir.to_str().unwrap()).expect("loads .5 expiry");
+        save_state(dir.to_str().unwrap(), &st).expect("saves");
+        assert!(
+            saved_state_text(&dir).contains("2026-12-05T00:00:00.5Z"),
+            ".5 expiry must render .5Z, got:\n{}",
+            saved_state_text(&dir)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

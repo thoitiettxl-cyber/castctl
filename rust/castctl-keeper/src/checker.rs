@@ -147,7 +147,7 @@ impl GatewayChecker {
     async fn fetch_session_info_with_cookies(
         &self,
         cookies: &str,
-        _now: chrono::DateTime<chrono::Utc>,
+        _now: chrono::DateTime<chrono::FixedOffset>,
     ) -> Result<(Vec<ParsedCookie>, usize), (Vec<ParsedCookie>, usize, TransportError)> {
         let (status, data, headers) = match self
             .do_hatch(
@@ -304,7 +304,7 @@ impl Checker for GatewayChecker {
 fn to_updates(
     cookies: &[ParsedCookie],
     raw_url: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::FixedOffset>,
 ) -> Vec<CookieUpdate> {
     let mut out = Vec::new();
     for c in cookies {
@@ -392,10 +392,10 @@ fn split_url(url: &str) -> Option<(bool, DialTarget, String)> {
 
 /// A clock that always returns the same instant (for
 /// `GatewayChecker` tests that need a fixed `now`).
-pub struct FixedClock(pub chrono::DateTime<chrono::Utc>);
+pub struct FixedClock(pub chrono::DateTime<chrono::FixedOffset>);
 
 impl Clock for FixedClock {
-    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+    fn now(&self) -> chrono::DateTime<chrono::FixedOffset> {
         self.0
     }
 
@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn to_updates_filters_unfiltered_domains() {
-        let now = chrono::Utc::now();
+        let now = chrono::Local::now().fixed_offset();
         let parsed = vec![
             ParsedCookie {
                 name: "hatch_sess".to_string(),
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn fake_clock_now_is_fixed() {
-        let now = chrono::Utc::now();
+        let now = chrono::Local::now().fixed_offset();
         let c = FakeClock::new(now);
         assert_eq!(c.now(), now);
     }

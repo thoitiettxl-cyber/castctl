@@ -15925,3 +15925,696 @@ Still open (disclosed, not fixed here): F2 exotic-DNS-rdata
 gap (§M7f.3, 7 types); the GODEBUG `urlstrictcolons=0`
 carve-out above; `docs/differential-sweeps.md` row for the
 PR (parent adds it at PR time).
+
+## M7g — Keeper times: Rust matches Go byte-for-byte (2026-11-07)
+
+**The bug.** Same machine (TZ `+07:00`), same config, same
+expired jar copy: Go `keeper check` printed
+`"next_check_at":"2026-11-07T18:33:11.890775586+07:00"`; Rust
+printed `"next_check_at":"2026-11-07T11:33:15.063157834+00:00"`.
+Same instant, different representation. Go's keeper keeps
+the machine-local offset (`time.Now()` marshals with the
+local zone); Rust used `DateTime<Utc>` everywhere, which
+drops the offset on parse and emits `+00:00` on serialize.
+
+**Gates (cue, 2026-11-07, head `1d5d9cb`, own
+`CARGO_TARGET_DIR=/tmp/m7g-target`, deleted after)** —
+`cargo fmt --check`: 0; `cargo clippy --workspace
+--all-targets -- -D warnings`: 0; `cargo test --workspace`
+(`CASTCTL_TEST_GO=/usr/local/go/bin/go`): **66 suites, 1678
+passed, 0 failed** (1661 baseline + 17 new M7g tests);
+`castctl-rs/tests/parity.rs`: `golden_parity` ok (46/46
+`--help` byte-identical, part of the workspace run); sweep
+`parity/sweep_go_vs_rs.py` (Rust binary
+`/tmp/m7g-target/release/castctl-rs`, Go
+`/usr/local/bin/castctl`): **TOTAL=109, DIFFS=0,
+skipped_live=9** (109 + 9 = 118 cases, the M7f case
+count; the 9 live cases are skipped without
+`SWEEP_LIVE=1` by design); live `keeper check`
+Go-with-chromedp vs Rust (supporting evidence; Pi re-runs
+live E2E independently): **equal except run-seconds**
+— fixtures `/tmp/m7g-live/{go,rs}` (own `/tmp` config +
+copied live cookies, 0600, never the live profile
+`no.0`), Go built `-tags
+with_utls,with_quic,with_wireguard,with_gvisor,with_chromedp`
+from `main` `1396697`, Rust release binary from this
+head. Go: exit 0, `outcome ok, stopped false,
+cookies_seen 10, wrote_cookies true`,
+`"next_check_at":"2026-11-08T18:28:28.669241083+07:00"`;
+Rust: exit 0, identical fields,
+`"next_check_at":"2026-11-08T18:28:45.203118707+07:00"`
+(16.5s later — run-seconds). The saved
+`session-state.json` files agree field-for-field:
+`last_checked_at` / every `last_seen` `+07:00` on both
+sides, every `expires_at` / `earliest_expiry`
+(`2026-11-06T08:28:27Z`) / `driving_cookie`
+(`hatch_sess`) identical; only `hatch_sess` /
+`hatch_vml` expiry differs by 13s (`2026-12-07T11:28:19Z`
+vs `11:28:32Z`) — server-side sliding expiry on the
+gateway validation, not a deviation (the other 8
+cookies' expiries are byte-identical). Cookie files
+mode 0600 on both sides; cookie name set identical
+(10 names). [NEEDS-MEASUREMENT]: the expired-jar +
+CDP re-export live comparison was NOT run — it needs a
+logged-in browser, and the shared Chrome on cue port
+9226 belongs to another session; a fresh Chrome has no
+Muse session, so both sides would fail identically with
+`next_check_at` omitted (`None` on auth_error) and prove
+nothing about time format. Pi re-runs live E2E
+independently.
+`cargo check -p castctl-keeper --no-default-features`:
+exit 0; `cargo check --workspace --no-default-features`:
+exit 0 (workspace-level no-CDP command verified).
+
+### M7g.1 — Representation: `DateTime<FixedOffset>` for LOCAL, `Utc` for expiry
+
+Go ground truth (R1 probe, re-probed twice in the sandbox,
+Go 1.27.3 — the probe, not the summary, wins):
+
+- `time.Time` JSON round-trips `+07:00`, `Z`, `-03:00`
+  byte-identically; `+00:00` input re-marshals as `Z`
+  (Go normalises a zero offset to `Z`); trailing-zero
+  fractional digits are trimmed (RFC3339Nano); no-offset
+  input is rejected; `+99:00` is rejected ("time zone
+  offset hour out of range").
+- `+07:60` is ACCEPTED and normalises to `+08:00` with the
+  wall clock preserved (`18:33:11+08:00`, not `08:33:11` —
+  an earlier note recorded `08:33:11`, a transcription
+  error; the re-probe is Go itself and wins). `-07:60`
+  likewise becomes `-08:00`; `+07:59` is unchanged;
+  `+07:120` is rejected ("extra text").
+- `+23:60` / `+24:00` unmarshal ACCEPTS but `json.Marshal`
+  FAILS ("timezone hour outside of range [0,23]").
+  Chrono cannot represent a ±24h offset, so Rust rejects
+  these at load. Known deviation: Go load-ok/save-fails,
+  Rust load-fails; no round-trip is lost.
+- Go rejects: lowercase `t`, lowercase `z`, space
+  separator, `+0700`, `+07`, `.` with no digits,
+  `+07:00:30`, hour 24/25, Feb 30, trailing space, leap
+  second `:60`. Go accepts a 12-digit fraction (truncated
+  to 9) and `.5`.
+- `time.Now()` marshals with the local offset;
+  `Now().Add(d)` keeps the Local zone;
+  `time.Unix().UTC()` marshals `Z`. `Format(RFC3339)` is
+  seconds-only, stored offset kept. `writeJSON` is plain
+  `json.NewEncoder` with indent
+  (`internal/commands/commands.go:411-416`).
+
+Rust rule (this milestone): plain `DateTime<FixedOffset>`
+for every LOCAL-origin keeper field; `DateTime<Utc>` KEPT
+for expiry fields. The single seam is `Clock::now()`,
+which returns `DateTime<FixedOffset>` via
+`Local::now().fixed_offset()`
+(`rust/castctl-keeper/src/clock.rs`). No newtype, no new
+crate, no chrono `serde` feature. Serde is a hand-written
+`rfc3339_offset` module next to `state.rs::rfc3339`,
+using `parse::<DateTime<FixedOffset>>()` +
+`to_rfc3339_opts(AutoSi, true)` — which re-emits the stored
+offset, trims trailing-zero nanos like Go RFC3339Nano, and
+collapses a zero offset to `Z`, exactly matching Go (the
+`+00:00`→`Z` collapse is Go behaviour, not a deviation —
+R1 probe P2 proved it; no Z-remembering type is built).
+
+> **Correction (fix loop 1, 2026-11-07 — Phase 3 round 1
+> found this paragraph false):** `to_rfc3339_opts(AutoSi,
+> true)` does NOT trim trailing-zero nanos like Go: it
+> emits only 0/3/6/9 fraction digits (`.500`, `.120`,
+> `.123456780`), while Go's RFC3339Nano trims ALL trailing
+> zeros (`.5`, `.12`, `.12345678`) — about 1 in 10 real
+> timestamps. Every render site now uses the one shared
+> helper `castctl-shared/src/timefmt.rs::format_go_rfc3339_nano`
+> (9-digit nanos, strip trailing zeros, `Z` for a zero
+> offset); see "Fix loop 1" below. The same loop fixed
+> the other false/overbroad claims in this section:
+> `normalize_offset_minutes` carries ONLY `mm == 60`
+> (61–99 are rejected by Go); `check_go_strict` now
+> validates the full offset shape (`Z` | `±HH:MM`) and
+> end-of-input (rejecting `+0700`, trailing text, and
+> surrounding whitespace); and the expiry fields moved
+> from `DateTime<Utc>` to `DateTime<FixedOffset>` (B6),
+> so the legacy `rfc3339` Utc module is deleted. The
+> paragraphs below are kept as the M7g record; the
+> corrected behaviour is in "Fix loop 1".
+
+Chrono 0.4.45 `parse_rfc3339` is MORE lenient than Go: it
+accepts `t`/`T`/space separators, `z`/`Z`, leap second
+`:60` (maps to `:59`+1s), any number of fraction digits,
+and U+2212 minus in offsets; offset minutes must be 00–59
+(it rejects `+07:60`). The new module therefore
+pre-checks before parsing (`check_go_strict`: separator
+must be `T`, no leap second, `.` needs digits, offset must
+be `Z`/`+`/`-`) and normalises out-of-range offset minutes
+(`normalize_offset_minutes`: carry into the hour, wall
+clock preserved) — both verified against the Go probes
+above. `ParseError` has no public constructor, so
+strict-check failures return `String` errors surfaced via
+`serde::de::Error::custom`. [Superseded in fix loop 1:
+the legacy `rfc3339` Utc module is deleted; expiry fields
+are `FixedOffset` via `rfc3339_offset` (B6) — the sentence
+below is kept as the M7g record only.] The legacy
+`rfc3339` Utc module keeps chrono leniency (pre-existing;
+expiry fields only — Go writes those as `Z` anyway, so no
+spelling reaches them).
+
+Field map (Go → Rust):
+
+| Go (LOCAL) | Rust |
+|---|---|
+| `internal/keeper/clock.go:39` `realClock.Now()=time.Now()` | `clock.rs` `RealClock::now()` |
+| `tick.go:64,528,560-565,592,796-797,803,872,886,999,1014,1019,1109-1115,1135-1141,1179-1187,1242` | `state.rs` `SessionState.{last_checked_at,next_check_at,login_started_at,login_at,warned_at}`, `CookieState.last_seen`, `WarnedKind.at`; `tick.rs` assignments flow from `clock.now()` |
+| `login.go:145,330,337,343-344,394,401` (`started := clock.Now()`) | `login.rs` `run`/`run_inner`/`finish`/`failed` `started`, `set_login_flag` `now`; `AuditRecord.started_at` (`login.go:262` field, `:420-431,435-480` JSONL audit) |
+| `state.go:185-196` `MarkWarnSent` (NOT 205-217 — that is `ClearWarnEpisode`) | `state.rs` `mark_warn_sent`, `mark_warn_sent_raw`, `mark_warn_pending` |
+| `state.go:339-355` `RefreshCookieRecords` (`LastSeen`:342) | `state.rs` `refresh_cookie_records` |
+| `jar.go` effective-set / header merge | `jar.rs` `effective_set_cookie`, `cookie_header`, `merge_cookie_header` `now`/`received_at` |
+| `tick.go` export validation / relogin | `tick.rs` `validate_exported_set`, `try_relogin` `_now`; `backoff.rs` `next_delay_after` `now`; `relogin.rs` `usable_session`, harvest `now`; `checker.rs` `FixedClock`, `to_updates`, `fetch_session_info_with_cookies` `_now` |
+
+| Go (UTC — expiry) | Rust (fix loop 1: `FixedOffset`, constructed from UTC instants) |
+|---|---|
+| `jar.go:430,461,470`, `state.go:344` | `state.rs` `CookieState.expires_at`, `SessionState.{earliest_expiry,driving_expiry}`; `run.rs` `Status.{earliest_expiry,driving_expiry}`; `authstatus.rs` `AuthStatus.driving_expiry`, `cookie_expiry_metadata`, `derive_auth_status` `now` — all `DateTime<FixedOffset>` since fix loop 1 (B6), via `state.rs::rfc3339_offset::opt` serde; `jar.rs::epoch_to_datetime` returns `FixedOffset` (offset zero, so Go-written values still render `Z`); `login.rs` `LoginResult` / `AuditRecord.earliest_expiry`; `backoff.rs::next_delay_after` `driving_expiry`. Comparisons stay instant-based (chrono cross-`Tz` `Ord` / `signed_duration_since`); `derive_auth_status` / `cookie_expiry_metadata` `now` params stay `Utc` (instant-only). The old `DateTime<Utc>` expiry type normalised a stored non-`Z` offset to `Z` on re-print and had a different accept-set (accepted lowercase `z`, rejected `+07:60`) — both fixed by the move; the legacy `rfc3339` Utc module is deleted. |
+| `auth.rs:154/314` `Utc::now()` (CLI `auth` instant-only, no render) | unchanged — instant-only comparisons, no render |
+
+`authstatus.rs` `AuthStatus.last_checked_at` is LOCAL
+(`FixedOffset`); its `now` params stay `Utc` (caller-side
+`Utc::now()`, instant-only). `run.rs` `Status`
+`last/next_check_at` are LOCAL; `PanickingClock` test
+follows `Clock`. Dead helper `store.rs:338` `now_utc()`
+(zero callers) left as-is.
+
+### M7g.2 — The two offset-drop sites
+
+1. `state.rs` serde: the old `rfc3339` module parsed into
+   `DateTime<Utc>` (offset dropped) and serialised with
+   `+00:00`. Fixed by `rfc3339_offset` (M7g.1) on every
+   LOCAL field above, including `AuditRecord.started_at`.
+2. Webui `keeper_status.rs:113-119` `parse_time` did
+   `.with_timezone(&Utc)` — the second drop site. Now
+   `parse_time` returns `DateTime<FixedOffset>` (mirroring
+   `state.rs::rfc3339_offset::parse` locally — the webui
+   has no keeper dependency, so `check_go_strict`
+   and `normalize_offset_minutes` are duplicated there;
+   keep the two in sync), and — since fix loop 1 (B6) —
+   the expiry fields use `parse_time` too (the old
+   `parse_time_utc`, which converted to UTC after
+   parsing, is deleted), so a stored non-`Z` expiry
+   offset is preserved like Go. `KeeperStatus` /
+   `KeeperStatusFields` split the same way; `to_json`
+   renders every time field via the shared
+   `castctl_shared::timefmt::format_go_rfc3339_nano`
+   helper (fix loop 1, B1: the old `rfc3339_nano_offset`
+   used `to_rfc3339_opts(AutoSi, true)` and the expiry
+   fields used the existing `chats::rfc3339_nano`).
+   `handlers.rs:1123,1126` renders `earliest_expiry` and
+   `last_checked_at` both via `keeper_rfc3339_offset`
+   (`to_rfc3339_opts(Secs, true)`, seconds-only with the
+   stored offset — Go `handlers.go:688,691`
+   `Format(time.RFC3339)`; the old `rfc3339(dt:
+   DateTime<Utc>)` helper, which forced `Z`, is deleted).
+   `chats.rs:53-59` `rfc3339_nano` (Utc, hardcoded `Z`) is
+   NOT changed — chat times are Go `nowUTC` (it already
+   trims trailing zeros the Go way, and is the pattern
+   the shared helper mirrors).
+
+Render decisions (recorded explicitly, per Go precision):
+
+- JSON (`keeper check` output, `session-state.json`,
+  audit JSONL, webui `to_json`): RFC3339Nano, stored
+  offset kept, `Z` for a zero offset — the one shared
+  helper `castctl_shared::timefmt::format_go_rfc3339_nano`
+  (fix loop 1, B1; the old `to_rfc3339_opts(AutoSi, true)`
+  printed `.500` where Go prints `.5`).
+  `keepercmd.rs:567` and `auth.rs:229/235` both use it,
+  so the two commands agree.
+- Webui login-status view: `Format(RFC3339)`,
+  seconds-only, stored offset kept —
+  `format_go_rfc3339_secs` (shared helper) for
+  `last_checked_at` (`keeper_status.rs::rfc3339_offset`)
+  and the expiry field alike. [Fix loop 2: the old
+  `to_rfc3339_opts(Secs, true)` rounded seconds-offsets
+  (`+07:06:30` -> `+07:07`); Go truncates. The old UTC
+  expiry twin that forced `Z` via
+  `format("%Y-%m-%dT%H:%M:%SZ")` was already deleted in
+  fix loop 1 (B6).]
+- Print sites (Go): `keeper.go:676,731,734,797-807`
+  (`nextCheckAt`, return:806); `run.go:294-311,341-346`;
+  `authstatus.go:64-65`, `keeper/authstatus.go:98,122-124`;
+  `handlers.go:658,688,691` (`Format(RFC3339)`, NOT:703);
+  `authlogin.go:171-184` (seconds-only `Z`);
+  `screencast.go:322-323` (seconds-only `Z`);
+  `handleGetKeeper` `handlers.go:1619,1636,1641`
+  (verbatim NANO). Only `.UTC()` calls in the keeper
+  surface are the expiry constructions; zero `.In(`.
+
+### M7g.3 — Tests (TDD, red first)
+
+RED run on pristine `1d5d9cb` (log `/tmp/m7g-red.log`):
+10 layer-1 tests, exactly 6 failed / 4 passed as
+predicted. Failed: `state::tests::{expiry_fields_stay_utc,
+local_offset_round_trip_preserves_stored_offset,
+offset_minutes_carry_like_go}`,
+`run::tests::read_status_keeps_go_written_offsets`,
+`keeper_status::tests::parsed_state_keeps_local_offset`,
+`keepercmd::tests::next_check_at_keeps_stored_offset`
+(the last left `Some("2026-11-07T11:33:11.890775586+00:00")`
+vs right `+07:00` — the exact reported drift). Passed
+(controls): `+00:00`→`Z`, no-offset corrupt, `+99:00`
+corrupt, webui `+00:00`→`Z`.
+
+New tests (layer-1 + layer-2), all in the crates touched:
+
+- `state.rs`: `state_write_carries_local_offset`
+  (`FakeClock` `+07:00`, fixed instant
+  `2026-11-07T18:33:11.890775586+07:00` — asserts the
+  state file text contains `+07:00`, no `+00:00`);
+  `go_strict_spellings_are_corrupt` (lowercase `t`/`z`,
+  space separator, `:60`, U+2212 minus);
+  `offset_24h_is_corrupt` (`+23:60`, `+24:00`).
+- `clock.rs`: `real_clock_now_carries_the_local_offset`.
+- `login.rs`: `audit_record_started_at_keeps_local_offset`
+  (`started_at` `+07:00`, `earliest_expiry` `Z` in the
+  same JSONL record).
+- `tick_table.rs`: `tick_writes_local_offset_state` (an
+  ok tick writes `+07:00` into `session-state.json`; raw
+  text asserted; the tick's fixed `now()` is the same
+  epoch `1_792_000_000` at `+07:00`).
+- `keeper_status.rs`: `rfc3339_offset_seconds_only_keeps_offset`
+  (`+07:00` and `Z` renderings).
+
+### M7g fix loop 1 — Phase 3 round-1 findings (2026-11-07)
+
+Round-1 review: technical BLOCKING (B1), safety
+PASS-WITH-NITS (N1 — the `check_go_strict` gap, fixed
+here as B3/B4; N2 — reviewer scratch on cue, deleted
+after the gates), red-team BLOCKING (B1–B6). All six
+BLOCKING findings fixed on the same branch, each with a
+regression test that failed before the fix and passes
+after (RED run on cue, `/tmp/m7g-fix1-red.log` +
+`/tmp/m7g-fix1-red-cli.log`: shared 2 failed, keeper
+state 6 failed, keeper clock 1 failed, webui 5 failed,
+CLI 2 failed — 16 failed total; GREEN focused run
+`/tmp/m7g-fix1-green-focused.log`: all 11 groups 0
+failed).
+
+- **B1 — `AutoSi` ≠ Go RFC3339Nano (precision).** Chrono
+  `SecondsFormat::AutoSi` emits only 0/3/6/9 fraction
+  digits (`.500`, `.120`, `.123400`, `.123456780`);
+  Go trims ALL trailing zeros (`.5`, `.12`, `.1234`,
+  `.12345678`) — about 1 in 10 real timestamps. Fix: one
+  shared helper
+  `castctl-shared/src/timefmt.rs::format_go_rfc3339_nano`
+  (9-digit nanos, strip trailing zeros, drop the dot when
+  empty, `Z` for a zero offset — mirroring the existing
+  `chats::rfc3339_nano`, which already trimmed this way),
+  used at every render site: `state.rs::rfc3339_offset`
+  serialize + `opt::serialize`, `keeper_status.rs::rfc3339_nano_offset`
+  (now a delegating wrapper) + the expiry renders there,
+  `keepercmd.rs::next_check_at`, `auth.rs:229,235`. The
+  `castctl-shared` dep was added to `castctl-keeper` and
+  `castctl-webui` (`Cargo.toml`); no new crate. [Fix loop
+  2 correction: the seconds-only renders
+  (`rfc3339_offset`, `Secs`) were NOT already correct —
+  `to_rfc3339_opts(Secs, true)` rounds seconds-offsets
+  the same way `%:z` does (`+07:06:30` -> `+07:07`;
+  Go truncates to `+07:06`); they now render via the
+  shared `format_go_rfc3339_secs` (technical N1).]
+  Tests: fraction
+  round-trips `.5` / `.1` / `.12` / `.1234` /
+  `.12345678` / `.00000001` / `.123` / `.123456` +
+  no-fraction (literal Go-probe outputs), in `timefmt`,
+  `state`, `keeper_status`, `keepercmd`, `auth`; plus a
+  fake-clock write test at nanos `120000000` (`.12`).
+- **B2 — offset minutes 61–99 accepted and carried.**
+  `normalize_offset_minutes` carried any `mm >= 60`;
+  Go rejects 61–99 ("offset minute out of range") and
+  carries ONLY `mm == 60` (`+07:60` -> `+08:00`). Fix:
+  carry only when `mm == 60`; 61–99 are left for chrono
+  to reject. Fixed in BOTH copies (`state.rs` +
+  `keeper_status.rs` mirror). Tests: `+07:61`,
+  `+07:75`, `+07:99`, `-07:61` are corrupt, both crates.
+- **B3+B4 — `check_go_strict` missed the offset shape
+  and end-of-input.** It only checked the introducer
+  byte, so chrono accepted `+0700` (no colon), trailing
+  text (`+07:00:30`), and surrounding whitespace —
+  all rejected by Go. Fix: the offset must be exactly
+  `Z` (and then end-of-input) or `±HH:MM` (two digits,
+  colon, two digits, then end-of-input); leading/trailing
+  ASCII whitespace is rejected up front. Fixed in BOTH
+  copies. Tests: `+0700`, trailing space, leading space,
+  `+07:00:30`, trailing space after `Z`, `\n` / `\t`
+  (via JSON escapes, which decode to real whitespace
+  before the parser), both crates. (Trailing `\n`/`\t`
+  as raw bytes inside a JSON string are invalid JSON and
+  never reach the parser — the tests use the escaped
+  form, which is the reachable spelling.)
+- **B5 — clock seam TZ parity.** Go's `time.Local`
+  NEVER parses POSIX TZ strings and NEVER falls back to
+  `/etc/localtime` for an unknown name: unknown/non-IANA
+  `TZ` -> UTC. Chrono's `Local` falls back to
+  `/etc/localtime` for unknown names and parses POSIX
+  strings. Probed matrix, Go vs Rust `Local::now()`,
+  cue 2026-11-07 (Go probe `/tmp/m7g-fix1-tzprobe/tzprobe.go`,
+  Rust probe `cp/src/main.rs`, chrono 0.4.45; verbatim):
+
+  | `TZ` | Go | Rust (before) |
+  |---|---|---|
+  | unset | `+07:00` | `+07:00` |
+  | `""` (set, empty) | UTC | UTC |
+  | `UTC`, `:UTC` | UTC | UTC |
+  | `Asia/Ho_Chi_Minh`, `:Asia/Ho_Chi_Minh` | `+07:00` | `+07:00` |
+  | `GarbageXYZ`, `:GarbageXYZ` | UTC | **`+07:00`** |
+  | `UTC+7` | UTC | **`-07:00`** |
+  | `EST5EDT,M3.2.0,M11.1.0` | UTC | **`-05:00`** |
+  | `Etc/GMT+12` | `-12:00` | `-12:00` |
+  | `America/New_York` | `-05:00` | `-05:00` |
+  | `/usr/share/zoneinfo/Asia/Ho_Chi_Minh` | `+07:00` | `+07:00` |
+  | `/etc/localtime` | `+07:00` | `+07:00` |
+  | `localtime` | `+07:00` | `+07:00` |
+  | `:` | UTC | **`+07:00`** |
+  | `UTC0` | UTC | UTC |
+  | `../etc/localtime` | UTC | **`+07:00`** |
+  | `/nonexistent` | UTC | **`+07:00`** |
+  | `/usr/share/zoneinfo/../zoneinfo/UTC` | UTC (loads) | UTC |
+  | `../../../../etc/localtime` | `+07:00` (loads) | `+07:00` |
+  | `America/New_York/` | UTC | — |
+  | `America//New_York` | `-05:00` | `-05:00` |
+
+  Fix: `clock.rs::go_local_now(tz, now_utc)` implements
+  Go's resolution — `TZ` unset -> chrono `Local`
+  (`/etc/localtime`); set-but-empty or `UTC` -> UTC; one
+  leading `:` stripped; an absolute path loads directly;
+  a relative name is joined onto each zoneinfo dir in
+  order (`/usr/share/zoneinfo`,
+  `/usr/share/lib/zoneinfo`, `/usr/lib/locale/TZ`,
+  `/etc/zoneinfo` — the 4th Go `platformZoneSources` dir,
+  added in fix loop 2, technical N4) and
+  the first readable TZif file wins (`..` segments
+  resolve through the OS exactly as in Go); anything
+  else -> UTC. The offset at the instant comes from the
+  TZif file itself
+  (`castctl-shared/src/timefmt.rs::tz_offset_at`,
+  reusing the existing TZif parser — transitions, DST,
+  and pre-transition types included, so `America/New_York`
+  is `-05:00` in November and `-04:00` in July, and
+  `Asia/Ho_Chi_Minh` is `+08:00` at the epoch). The `TZ`
+  value is a parameter, not the process env, so the
+  matrix test cannot race under the parallel runner.
+  `RealClock::now()` reads `TZ` as bytes
+  (`std::env::var_os`, fix loop 2 R2-B3 — a non-UTF8
+  value is an unknown name -> UTC, not "unset") and
+  calls it. Two deliberate divergences from Go,
+  both fail-closed: a candidate must be a regular file
+  first (so a crafted `TZ` can never make the keeper
+  read stdin — Go would try), and a name present only
+  in GOROOT's `zoneinfo.zip` falls back to UTC (no
+  Debian host with tzdata installed needs it). The
+  `relogin.rs:763` harvest `now` and the `checker.rs`
+  test-only `Local::now()` calls were checked: instant-only
+  comparisons, never stored or rendered — not changed.
+- **B6 — expiry fields must preserve a stored non-`Z`
+  offset.** Go's `time.Time` keeps the zone on unmarshal
+  for expiry fields too; Rust's legacy `DateTime<Utc>`
+  module normalised them to `Z` on re-print, accepted
+  lowercase `z`, and rejected `+07:60` — three
+  behaviours, and the webui path disagreed with the
+  keeper path on two of them (webui rejected lowercase
+  `z`; webui accepted `+07:60` but printed the UTC
+  instant). Fix: every expiry field moved to
+  `DateTime<FixedOffset>` with the `rfc3339_offset`
+  serde (`state.rs` `expires_at` / `earliest_expiry` /
+  `driving_expiry`, `run.rs::Status`, `login.rs`
+  `LoginResult` / `AuditRecord`, `authstatus.rs`
+  `AuthStatus.driving_expiry` / `ExpiryMetadata`,
+  `backoff.rs::next_delay_after`,
+  `jar.rs::epoch_to_datetime` / `earliest_expiry` /
+  `driving_cookie`, webui `KeeperStatus` /
+  `KeeperStatusFields`); construction sites still
+  produce UTC instants (`epoch_to_datetime` returns
+  offset zero, so Go-written values still render `Z`).
+  All expiry comparisons were verified instant-based
+  (they already were — chrono cross-`Tz` `Ord` /
+  `signed_duration_since`); the `derive_auth_status` /
+  `cookie_expiry_metadata` `now` params stay `Utc`.
+  The legacy `rfc3339` Utc module is deleted. Tests: a
+  `+07:00` expiry re-prints `+07:00` (keeper + webui),
+  lowercase-`z` expiry is corrupt, `+07:60` expiry
+  carries to `+08:00`, `.5` expiry renders `.5Z`.
+
+Gates (fix loop 1, cue, final tree — `gates3`/`gates4`
+logs `/tmp/m7g-fix1-gates3.log`, `/tmp/m7g-fix1-gates4.log`;
+the only tree delta between the two runs is three
+behaviour-neutral lines — an unused-variable removal, an
+import move, a doc blank line — and the md5 of
+`timefmt.rs` matches the sandbox exactly):
+`cargo fmt --check` exit 0; `cargo clippy --workspace
+--all-targets -- -D warnings` exit 0; `cargo test
+--workspace` 1694 passed, 0 failed, 66 suites (baseline
+1678 + 16 new regression tests; the known `castctl-update`
+`update_flow` flake did not appear); `cargo check -p
+castctl-keeper --no-default-features` exit 0; `cargo
+check --workspace --no-default-features` exit 0;
+release build exit 0; `parity/sweep_go_vs_rs.py`
+TOTAL=109 DIFFS=0 skipped_live=9. (Gate history: gates1
+clippy failed on the `trans` unused variable; gates2
+clippy failed on the `backoff.rs` unused `Utc` import
+and four `clock.rs` doc-continuation lints — all fixed,
+no behaviour change; gates4's `trans` warning line in
+the no-default-features check was a stale cargo warning
+replay from the gates1 fingerprint, proven by the md5
+match, and a clean re-check in gates5 shows no `trans`
+warning. The four `cdp.rs` unused-import warnings under
+`--no-default-features` are pre-existing — that file is
+untouched by this loop; they are imports used only with
+the `chromedp` feature, and the checks still exit 0.)
+
+### M7g fix loop 2 — Phase 3 round-2 findings (2026-11-07)
+
+BLOCKING findings fixed on the same branch, each with a
+regression test that failed before the fix and passes
+after (RED evidence on cue: slice 1 in
+`/tmp/m7g-fix2-red1.log` — shared bomb tests aborted
+SIGABRT, 11 MB test FAILED, truncated guard passed
+pre-fix as predicted; slices 2–4 RED runs are the
+session exec outputs, not a cue log file — clock
+compile E0308, nano test FAILED, Secs test FAILED,
+lookup test FAILED; GREEN focused runs per slice,
+see below).
+
+- **R2-B1 — TZif parser aborts the process on a crafted
+  51-byte file.** `parse_tzif_block` trusted the header
+  counts for `Vec::with_capacity` before any length
+  validation — `timecnt=0xFFFFFFFF` -> `memory
+  allocation of 34359738360 bytes failed`, exit 134
+  (SIGABRT). Go on the same file returns UTC, exit 0.
+  Reachable via `RealClock::now()` on every keeper tick.
+  Fix: validate all six counts against the data length
+  before allocating (`parse_tzif_block`, `timefmt.rs`),
+  and cap reads at Go's exact 10 MiB
+  (`MAX_TZIF_BYTES = 10 << 20`, Go `zoneinfo_read.go:37`
+  `maxFileSize`; Go rejects `len > maxFileSize`, exactly
+  10 MiB is accepted) via a new bounded
+  `read_tzif_file` used by `tz_abbr_at`/`tz_offset_at`.
+  Tests: `tzif_huge_timecnt_does_not_abort`,
+  `tzif_huge_typecnt_does_not_abort`,
+  `tzif_truncated_header_is_none`.
+- **R2-B2 — 11 MB TZ file.** Go rejects it (10 MiB cap),
+  Rust loaded it and returned `Some(25200)`. Fixed by
+  the same 10 MiB cap (R2-B1). Test:
+  `tz_offset_at_rejects_files_over_10mb_like_go`
+  (11 MB -> `None`, exactly 10 MiB -> `Some(25200)`).
+- **R2-B3 — non-UTF8 `TZ`.** Go falls back to UTC; Rust
+  read it as unset and used `/etc/localtime` (+07:00),
+  because `RealClock::now` used `env::var("TZ")` whose
+  `Err` conflates unset + non-UTF8. Fix: read `TZ` as
+  bytes (`var_os` + `OsStrExt::from_bytes` — the safe
+  Unix API, no `unsafe`; the crate already uses
+  `std::os::unix` unconditionally elsewhere) in
+  `clock.rs::go_local_now` and
+  `timefmt.rs::local_zone_path`, so a non-UTF8 value is
+  an (unknown -> UTC) name, not unset. Test:
+  `go_local_now_non_utf8_tz_falls_back_to_utc`
+  (`TZ=$'\xff\xfe'` -> UTC).
+- **Safety N1 — `go_local_now` `None` branch ignored
+  `now_utc`.** It returned `Local::now()` (a fresh
+  instant). Fix: `Local.from_utc_datetime(&now_utc.naive_utc()).fixed_offset()`.
+  The matrix test's `None` row is now date-stable:
+  `go_local_now_unset_uses_the_passed_instant`.
+- **Technical N1 — seconds-offsets rounded, not
+  truncated.** `format_go_rfc3339_nano` used chrono's
+  `%:z`, which rounds a seconds-offset to the nearest
+  minute (`+07:06:30` -> `+07:07`); Go truncates
+  (`+07:06:30` -> `+07:06`, `-07:06:30` -> `-07:06`,
+  even `-30s` -> `+00:00`, the sign taken from the
+  truncated minutes — Go `format.go` `zone :=
+  offset/60`). Fix: one shared `go_offset_suffix`
+  (truncate-toward-zero) used by the nano helper and by
+  a new shared `format_go_rfc3339_secs`; the Secs twin
+  `keeper_status.rs::rfc3339_offset` now renders via it
+  (chrono's `to_rfc3339_opts(Secs, true)` rounded the
+  same way — the fix-loop-1 claim that the Secs renders
+  "were already correct" was wrong; corrected above in
+  the B1 bullet). Latent only (the parser rejects
+  seconds-offsets) — fixed anyway, the helpers are the
+  single funnel. Tests: literal Go 1.27.3 probe outputs
+  (`+07:06:30`, `-07:06:30`, `±30s`, `±561s`) in
+  `timefmt` and `keeper_status`.
+- **Technical N2 — `lookupFirstZone` cases (1)/(2).**
+  `lookup_type_idx` implemented only Go's cases (3)/(4)
+  (first non-DST type, else 0). Implemented (1) zone 0
+  unused by any transition -> 0, and (2) first
+  transition targets a DST zone -> closest non-DST zone
+  before that target's index, following Go
+  `zoneinfo.go:233-260` exactly (an out-of-range target
+  index falls through to case 3 instead of indexing
+  blindly — Go's loader validates indices, so it cannot
+  occur for a Go-loaded file). Test:
+  `lookup_first_zone_matches_go_cases_1_and_2` (crafted
+  v1 TZif files, Go's answers from the source cases) +
+  a case-3 guard.
+- **Technical N3 — TZif v2 footer `extend` ignored.**
+  Implementing tzset is out of scope; disclosed in
+  "Still open" (M7g.1): Go applies the footer for
+  instants after the last transition; every stock zone
+  file has transitions past 2026, so no current instant
+  is affected.
+- **Technical N4 — 4th zone source.** `go_local_now`
+  now tries `/etc/zoneinfo` after
+  `/usr/share/zoneinfo`, `/usr/share/lib/zoneinfo`,
+  `/usr/lib/locale/TZ` (all four Go
+  `platformZoneSources` dirs).
+- **Technical N5 — stale sentences.** The two §M7g.1
+  sentences about the deleted legacy module / deleted
+  `%Y-%m-%dT%H:%M:%SZ` format are tagged
+  `[Superseded ...]` / rewritten to name the shared
+  helpers.
+- **Technical N6 / red-team N3 — `+23:60` disclosure
+  narrowed.** `warned_at`/`warned_kinds[].at` are never
+  overwritten by the tick (`tick.go` zero hits), so
+  Go's save fails there too — the "Still open"
+  sentence now says so, with the evidence.
+- **Red-team N1 — resolve-once.** Go resolves
+  `time.Local` once (`localOnce`); Rust re-reads `TZ`
+  on every `now()` call. Documented in "Still open",
+  not fixed (nothing in-process changes `TZ`).
+- **Red-team N4 — `last_seen` missing/null.** Pre-
+  existing, disclosed in "Still open"; left as-is
+  (Go-written states always carry `last_seen`).
+- **Red-team N5 — research P2 correction.**
+  `research-go-times.md:126` fixed: the `+00:00`
+  re-marshal is `18:33:11Z` (wall clock preserved),
+  not `11:33:11Z`; the P2 conclusion itself was always
+  correct.
+- **Red-team N6 — gates harness.** Gate commands now
+  capture `PIPESTATUS` instead of trusting `echo $?`
+  after a pipeline.
+- **Safety N2 — cue cleanup at PR time.** Delete the
+  fix-loop-2 target dir (`/tmp/m7g-fix2-target`) after
+  the final gate; do NOT delete `/tmp/m7g-writer`.
+- **Safety N3 — parser hardening.** Covered by the
+  R2-B1/B2 fix (count validation + bounded read).
+  What remains: `local_zone_path`'s absolute-`TZ`
+  branch has no `is_file` guard (pre-existing, via
+  `local_abbr_now` only) — Go tries to read such a
+  path too, so no divergence is introduced there.
+
+Gates on cue (final tree, logs `/tmp/m7g-fix2-gates1.log`
+(fmt/clippy first run), `/tmp/m7g-fix2-clippy.log`,
+`/tmp/m7g-fix2-test-full.log`, `/tmp/m7g-fix2-gates2.log`):
+`cargo fmt --check` exit 0 (after fixing 6 hand-applied
+fmt diffs in the new code); `cargo clippy --workspace
+--all-targets -- -D warnings` exit 0 (after fixing one
+`useless_vec` in a slice-1 test); `cargo test
+--workspace --no-fail-fast` **1703 passed, 0 failed, 66
+suites** (baseline 1694 + 9 new regression tests);
+`cargo check -p castctl-keeper --no-default-features`
+exit 0; `cargo check --workspace --no-default-features`
+exit 0; release build exit 0;
+`sweep_go_vs_rs.py` **TOTAL=109 DIFFS=0
+skipped_live=9** (same as fix loop 1).
+
+Gate-history notes (environmental, not code): the first
+full `cargo test --workspace` run stopped after
+`castctl-cli::test_update_invalid_version_no_network`
+failed — the cue tree copy had no `.git` (tar
+--exclude=.git), so `build.rs` produced an empty stamp
+and `update` refused before parsing `--version`.
+Syncing `.git` (8.2M) and touching `build.rs` made the
+test pass; the full suite then ran 1703/0
+(`--no-fail-fast`, so one failure cannot hide the
+rest). `cargo` on cue also regenerated
+`rust/Cargo.lock` (+2 lines: the `castctl-shared` deps
+from fix loop 1's `Cargo.toml` edits, never regenerated
+in the sandbox, which has no cargo); that lockfile
+update is synced back into the tree.
+
+### M7g.4 — Rust always has the CDP exporter; installed Go 0.9.0 does not (Việc 2)
+
+Go selects the exporter by build tag:
+`internal/keeper/export_stub.go:5` (`//go:build
+!with_chromedp`, `CDPAvailable()=false`, `:17-19`) vs
+`export_cdp.go:5` (`//go:build with_chromedp`, `:68-70`
+true). The installed Go 0.9.0 artifact was built WITHOUT
+the tag, so on an expired jar it returns
+`outcome=auth_error, stopped=true`, exit 3
+(`commands/keeper.go:747-750`).
+
+Rust always compiles the exporter:
+`rust/castctl-keeper/Cargo.toml:19-20` feature `chromedp`
+(default ON, `dep:tokio-tungstenite`);
+`lib.rs:24-27`; `cdp.rs:453,852-853,855,921-926`
+(`CDP_AVAILABLE = cfg!(feature="chromedp")`);
+`export.rs:215-217` refuses when `!CDP_AVAILABLE`.
+Verified on cue: `cargo check -p castctl-keeper
+--no-default-features` exit 0 (4 unused-import warnings
+prove `mod real` is not compiled), and the workspace-level
+`cargo check --workspace --no-default-features` exit 0
+too (run in the M7g green gates, `/tmp/m7g-green.log`).
+
+Operational consequence: Rust matches Go-from-source
+(with-chromedp Go gives the identical result: same 14
+cookies, same expiry, mode 0600, exit 0); it differs only
+from the deployed Go artifact. This is NOT a Rust bug —
+record it here so the live-comparison diff is not
+misread as one.
+
+Still open (disclosed, not fixed here): the `+23:60` /
+`+24:00` load deviation (M7g.1) — and its tick
+consequence (red-team N2, narrowed in fix loop 2,
+technical N6): Go's tick RECOVERS only when the bad
+value is in a field the tick overwrites
+(`next_check_at`/`last_checked_at`, cookie records —
+`RefreshCookieRecords` replaces the whole map — and
+expiry fields, recomputed from the jar); a bad
+`warned_at` / `warned_kinds[].at` survives to Go's
+`SaveState` (`state.go:286-294` `json.MarshalIndent`),
+which fails, so Go returns `OutcomeError` on every tick
+— the entry is NOT stopped, but it never recovers until
+the file is fixed or a warning overwrites the field
+(`tick.go` has zero hits for `warned_at` /
+`warned_kinds`, verified by grep). Rust stops the entry
+as `state_corrupt` instead (load-time). Both sides fail;
+only the stage and outcome differ. Confined to
+hand-crafted files (no Go-written file contains a ±24h
+offset). The webui's mirrored parse helpers must stay in
+sync with `state.rs::rfc3339_offset` (no shared dep for
+the parse side — only the render helper is shared).
+Pre-existing, disclosed, not introduced by M7g or this
+loop: `CookieState.last_seen` missing/null is corrupt in
+Rust but loads as Go's zero time (red-team N1 — Go-written
+states always carry `last_seen`, no `omitempty`); the
+webui `load_state` parses only the four top-level time
+fields, so a corrupt `last_seen` renders normally in the
+webui while the keeper reports `state_corrupt` (red-team
+N3). B5 residuals: a `TZ` name present only in GOROOT's
+`zoneinfo.zip` falls back to UTC in Rust (Go would load
+it), and a crafted `TZ` naming a non-regular file falls
+back to UTC in Rust (Go would try to read it) — both
+fail-closed. The TZif v2 footer `extend` string is
+ignored (technical N3: Go applies it for instants after
+the last transition; every stock zone file has
+transitions past 2026, so no current instant is
+affected — implementing tzset is out of scope). Go
+resolves `time.Local` once (`localOnce`); Rust re-reads
+`TZ` on every `now()` call (red-team N1 — nothing
+in-process changes `TZ`, so no observable difference).
+A live DST-fold instant was not probed
+[NEEDS-MEASUREMENT] (no fold is constructible from the
+code — all arithmetic is Duration-adds on instants).

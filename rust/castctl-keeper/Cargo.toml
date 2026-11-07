@@ -21,6 +21,7 @@ chromedp = ["dep:tokio-tungstenite"]
 
 [dependencies]
 castctl-config = { path = "../castctl-config" }
+castctl-shared = { path = "../castctl-shared" }
 castctl-transport = { path = "../castctl-transport" }
 # M6a: the cheap chain reuses the gateway's hatch headers,
 # body summary, and timeout constants (no new `WithCookies`

@@ -13,9 +13,9 @@
 //!
 //! Deviations recorded here (see also the M7d report):
 //! - Time fields (`next_check_at`, status times) render
-//!   as RFC3339 UTC (`Z` / `+00:00`); Go echoes the
-//!   stored local offset (`+07:00`). The instants are
-//!   equal; only the representation differs.
+//!   as Go's RFC3339Nano with the stored offset (`+07:00`
+//!   on a `+07:00` machine, `Z` for a zero offset) since
+//!   M7g; the earlier UTC render is fixed.
 //! - The Rust gateway checker bounds each request at 20s
 //!   (`AUTH_TIMEOUT`), so a dead outbound fails the tick
 //!   at ~20s instead of at the full 90s check timeout.
@@ -560,11 +560,19 @@ impl<'a> KeeperRuntimes<'a> {
 /// The `next_check_at` for a check row
 /// (`keeper.go`: `nextCheckAt`): read from the state
 /// after the tick; a missing/corrupt state omits the
-/// field instead of failing the check.
+/// field instead of failing the check. Rendered as Go's
+/// JSON `time.Time` (RFC3339Nano, stored offset kept,
+/// `Z` for a zero offset) via the shared
+/// `castctl_shared::timefmt::format_go_rfc3339_nano`
+/// helper — the same helper `auth.rs` uses, so the two
+/// commands agree (M7g; fix loop 1, B1: the old
+/// `to_rfc3339_opts(AutoSi, true)` printed `.500` where
+/// Go prints `.5`).
 fn next_check_at(base_dir: &str, entry: &KeeperEntry) -> Option<String> {
     let paths: Paths = profile_paths(base_dir, &entry.profile).ok()?;
     let st = load_state(&paths.dir).ok()?;
-    st.next_check_at.map(|t| t.to_rfc3339())
+    st.next_check_at
+        .map(|t| castctl_shared::timefmt::format_go_rfc3339_nano(&t))
 }
 
 /// One per-tick summary line (`cmdKeeperRun`): stdout,
@@ -790,8 +798,8 @@ async fn check_entries(
 /// One check row (`keeperCheckResult`): field order
 /// tag, profile, outcome, stopped, cookies_seen,
 /// wrote_cookies, next_check_at?, state_corrupt?.
-/// `next_check_at` renders as RFC3339 UTC (see the
-/// module header: Go echoes the stored offset).
+/// `next_check_at` renders as RFC3339Nano with the
+/// stored offset (M7g).
 fn print_check_row(
     ctx: &mut Ctx<'_>,
     entry: &KeeperEntry,
@@ -1296,6 +1304,55 @@ mod tests {
         // No next_check_at: the stopped tick writes no
         // future check time.
         assert!(v.get("next_check_at").is_none());
+    }
+
+    /// M7g: `keeper check` echoes the state's stored
+    /// offset for `next_check_at` (Go `nextCheckAt`,
+    /// `keeper.go:797-807`, returns `st.NextCheckAt`
+    /// verbatim; JSON marshal is RFC3339Nano with the
+    /// stored offset, `Z` for a zero offset).
+    #[test]
+    fn next_check_at_keeps_stored_offset() {
+        let dir = temp_dir("check-next-at");
+        let profile_dir = dir.join("profiles/alpha");
+        fs::create_dir_all(&profile_dir).unwrap();
+        fs::write(
+            profile_dir.join("session-state.json"),
+            b"{\"version\":1,\"last_tick_outcome\":\"ok\",\"next_check_at\":\"2026-11-07T18:33:11.890775586+07:00\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            next_check_at(dir.to_str().unwrap(), &entry("k-alpha", "alpha")),
+            Some("2026-11-07T18:33:11.890775586+07:00".to_string())
+        );
+    }
+
+    #[test]
+    fn next_check_at_trims_trailing_zeros_like_go() {
+        // Fix loop 1, B1 (`keeper check` render site): a
+        // stored `.500000000` renders `.5` in Go, not
+        // `.500`.
+        let dir = temp_dir("check-next-at-frac");
+        let profile_dir = dir.join("profiles/alpha");
+        fs::create_dir_all(&profile_dir).unwrap();
+        fs::write(
+            profile_dir.join("session-state.json"),
+            b"{\"version\":1,\"last_tick_outcome\":\"ok\",\"next_check_at\":\"2026-11-07T18:33:11.500000000+07:00\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            next_check_at(dir.to_str().unwrap(), &entry("k-alpha", "alpha")),
+            Some("2026-11-07T18:33:11.5+07:00".to_string())
+        );
+        fs::write(
+            profile_dir.join("session-state.json"),
+            b"{\"version\":1,\"last_tick_outcome\":\"ok\",\"next_check_at\":\"2026-11-07T18:33:11.123456780+07:00\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            next_check_at(dir.to_str().unwrap(), &entry("k-alpha", "alpha")),
+            Some("2026-11-07T18:33:11.12345678+07:00".to_string())
+        );
     }
 
     /// A live single-flight owner makes `keeper run`
