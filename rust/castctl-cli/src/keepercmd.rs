@@ -98,6 +98,7 @@ pub(crate) struct KeeperSetup {
 pub(crate) fn keeper_config(ctx: &mut Ctx<'_>, g: &GlobalOpts) -> Result<KeeperSetup, FlowErr> {
     let loc = resolve_config(ctx, g, false)?;
     let (single, _found) = load_single_config(&loc.config_dir).map_err(config_err)?;
+    crate::run::validate_webui_at_load(&single, &loc.config_dir)?;
     let Some(single) = single else {
         return Err(msg(
             2,
@@ -523,6 +524,12 @@ impl<'a> KeeperRuntimes<'a> {
                 let Ok((fresh, _found)) = load_single_config(&base_dir) else {
                     return None;
                 };
+                // Go reloads through the same deep parse, so a
+                // block that breaks a `webui` rule makes the
+                // reload fail exactly like an unreadable file.
+                if crate::run::validate_webui_at_load(&fresh, &base_dir).is_err() {
+                    return None;
+                }
                 let fresh = fresh?;
                 fresh.credential_for_profile(&profile_name)
             });
@@ -810,7 +817,14 @@ fn print_check_row(
         o.set("state_corrupt", JsonValue::Bool(true));
     }
     let compact = encode_ordered_json(&JsonValue::Object(o)).map_err(config_err)?;
-    ctx.out.stdout.push_str(&write_json_text(&compact));
+    let text = write_json_text(&compact);
+    // Go writes one row per entry inside the loop
+    // (`writeJSON(env.stdout(), out)`, `keeper.go:733`), so a
+    // multi-entry `keeper check` shows each row as its 90s tick
+    // finishes. Stream it now and keep the buffered copy for tests
+    // (the binary skips the replay once anything streamed).
+    crate::run::write_live(false, &text);
+    ctx.out.stdout.push_str(&text);
     Ok(())
 }
 
@@ -895,6 +909,13 @@ async fn run_entries_cmd(
         handles.push(tokio::spawn(async move {
             let on_tick: OnTick = Arc::new(move |res: &TickResult| {
                 let line = tick_summary_line(&entry_for_tick, res);
+                // Go prints each tick line as it happens
+                // (`fmt.Fprintf(os.Stdout, ...)` in the run
+                // loop), so a `journalctl -f` reader sees the
+                // keeper working. Buffering until exit made the
+                // run silent; write through now and keep the
+                // copy for the exit path's bookkeeping.
+                crate::run::write_live(false, &line);
                 if let Ok(mut b) = buf.lock() {
                     b.push_str(&line);
                 }
@@ -914,8 +935,10 @@ async fn run_entries_cmd(
     for r in releases {
         r.release();
     }
-    let buffered = out_buf.lock().map(|b| b.clone()).unwrap_or_default();
-    ctx.out.stdout.push_str(&buffered);
+    // The tick lines already reached stdout live (see `on_tick`), so
+    // the buffer is no longer replayed here; Go does not repeat them
+    // at exit either. The buffer stays for the tests that inspect it.
+    let _buffered = out_buf.lock().map(|b| b.clone()).unwrap_or_default();
     if root_cancel.is_cancelled() {
         // Interrupted: the main contract maps this to 130.
         return Err(msg_empty(130));

@@ -327,12 +327,68 @@ pub(crate) fn config_err(e: ConfigError) -> FlowErr {
 /// flat file (no `profiles` marker): the runtime builder's
 /// profile resolution refuses it with exit 2, as Go's
 /// `LoadProfile` does.
+/// Set once any command has written through [`write_live`].
+static LIVE_WRITTEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this process already wrote command output straight to the
+/// real streams, so the binary must skip replaying the buffered copy
+/// that exists only for tests.
+pub fn live_output_written() -> bool {
+    LIVE_WRITTEN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Write to the real process stream right now, like Go's
+/// `fmt.Fprintf(os.Stdout, ...)` inside the keeper tick loop and the
+/// `webui serve` startup path. A long-running command must show its
+/// lines while it runs: the buffered `Outcome` only reaches the
+/// terminal when the process exits, which is invisible to
+/// `journalctl -f` and to anything waiting for the startup line.
+/// Write errors are ignored, as Go ignores them on these paths.
+pub(crate) fn write_live(to_stderr: bool, text: &str) {
+    use std::io::Write;
+    // Record that this process streamed: the binary must not replay
+    // the buffered copy at exit, or every line prints twice.
+    LIVE_WRITTEN.store(true, std::sync::atomic::Ordering::SeqCst);
+    if to_stderr {
+        let mut e = std::io::stderr();
+        let _ = e.write_all(text.as_bytes());
+        let _ = e.flush();
+    } else {
+        let mut o = std::io::stdout();
+        let _ = o.write_all(text.as_bytes());
+        let _ = o.flush();
+    }
+}
+
+/// Go's `LoadSingleConfig` parses the typed `webui` block with the
+/// config directory at load time (`internal/profile/webui.go:274-287`,
+/// the tail of `ParseSingleConfig`), so a block that breaks a rule
+/// (unknown key, listen not loopback, token empty, duration or limit
+/// floor, `ui_dir` overlap) fails EVERY command with exit 2 and the
+/// `profile: ` prefix — not only `webui serve`. The Rust config crate
+/// keeps the block raw and checks shape only, so the deep rule runs
+/// here, at the same point in the flow. `parse_webui_block` already
+/// prefixes each message with `profile: ` (Go's `newConfigError`), so
+/// the message passes through unchanged.
+pub(crate) fn validate_webui_at_load(
+    single: &Option<SingleConfig>,
+    base_dir: &str,
+) -> Result<(), FlowErr> {
+    let Some(raw) = single.as_ref().and_then(|c| c.webui_raw.as_ref()) else {
+        return Ok(());
+    };
+    castctl_webui::config::parse_webui_block(raw, std::path::Path::new(base_dir))
+        .map(|_| ())
+        .map_err(|e| msg(2, e))
+}
+
 pub(crate) fn resolve_and_load_single(
     ctx: &mut Ctx<'_>,
     g: &GlobalOpts,
 ) -> Result<(ConfigLocation, Option<SingleConfig>), FlowErr> {
     let loc = resolve_config(ctx, g, false)?;
     let (single, _found) = load_single_config(&loc.config_dir).map_err(config_err)?;
+    validate_webui_at_load(&single, &loc.config_dir)?;
     Ok((loc, single))
 }
 
@@ -1281,7 +1337,7 @@ fn failing_chat_deps() -> castctl_webui::chats::ChatDeps {
     }
 }
 
-fn serve_webui(ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
+fn serve_webui(_ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
     use castctl_config::jsonvalue::JsonValue;
     use castctl_webui::auth::{hash_token, looks_like_bcrypt_hash};
     use castctl_webui::config::{effective_listen, resolve_webui};
@@ -1295,6 +1351,7 @@ fn serve_webui(ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
     // (config_err, `profile: ` prefix); a legacy flat file
     // parses as "not found" → the no-config-file message.
     let (single, found) = load_single_config(&loc.config_dir).map_err(config_err)?;
+    validate_webui_at_load(&single, &loc.config_dir)?;
     if !found {
         return Err(msg(
             2,
@@ -1464,9 +1521,10 @@ fn serve_webui(ctx: &mut Ctx<'_>, loc: &ConfigLocation) -> Result<(), FlowErr> {
                 return (1, Some(format!("webui serve: listen {listen}: {e}")));
             }
         };
-        ctx.out.stderr.push_str(&format!(
-            "castctl: web UI listening on {listen} (loopback only, token auth)\n"
-        ));
+        write_live(
+            true,
+            &format!("castctl: web UI listening on {listen} (loopback only, token auth)\n"),
+        );
         let serve_fut = server.serve_on(listener);
         tokio::pin!(serve_fut);
         tokio::select! {
@@ -2419,6 +2477,81 @@ mod tests {
             dir.to_str().unwrap()
         );
         assert_eq!(out.stdout, expected);
+    }
+
+    /// Go's `LoadSingleConfig` runs the deep `webui` block parse with
+    /// the config directory (`internal/profile/webui.go:274-287`), so a
+    /// block that breaks a rule fails EVERY command with exit 2 and the
+    /// `profile: ` prefix. Verified live against the Go binary on cue:
+    /// `castctl --config <dir>/config.json status` →
+    /// `castctl: profile: "webui.ui_dir" must not overlap the config
+    /// directory`, exit 2 (and the same for the unknown-key, listen,
+    /// token, duration and rate-limit rules).
+    #[test]
+    fn bad_webui_block_fails_every_command_at_load() {
+        let cases: [(&str, &str); 4] = [
+            (
+                r#"{"listen":"127.0.0.1:8317","token":"t","bogus":1}"#,
+                "castctl: profile: unknown webui config key \"bogus\"\n",
+            ),
+            (
+                r#"{"listen":"0.0.0.0:8317","token":"t"}"#,
+                "castctl: profile: \"webui.listen\" host must be loopback\n",
+            ),
+            (
+                r#"{"listen":"127.0.0.1:8317","token":"   "}"#,
+                "castctl: profile: \"webui.token\" must not be empty\n",
+            ),
+            (
+                r#"{"listen":"127.0.0.1:8317","token":"t","session_idle_timeout":"1s"}"#,
+                "castctl: profile: \"webui.session_idle_timeout\" must be a duration string from 1m0s to 720h0m0s\n",
+            ),
+        ];
+        for (block, want) in cases {
+            let home = temp_home("webui-load");
+            let cfg_dir = home.join(".config/castctl");
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            let cfg = format!(
+                "{{\"default_profile\":\"x\",\"profiles\":{{\"x\":{{}}}},\"webui\":{block}}}"
+            );
+            std::fs::write(cfg_dir.join("config.json"), cfg).unwrap();
+            let mut map = HashMap::new();
+            map.insert("HOME".to_string(), home.to_str().unwrap().to_string());
+            map.insert(
+                "XDG_CONFIG_HOME".to_string(),
+                cfg_dir.parent().unwrap().to_str().unwrap().to_string(),
+            );
+            for cmd in [&["status"][..], &["profile", "list"][..]] {
+                let out = run_env(cmd, map.clone());
+                assert_eq!(out.code, 2, "{cmd:?} must refuse: {block}");
+                assert_eq!(out.stderr, want, "{cmd:?} message: {block}");
+                assert!(out.stdout.is_empty(), "{cmd:?} stdout: {block}");
+            }
+        }
+    }
+
+    /// The overlap rule is checked with the config directory, so a
+    /// `ui_dir` that resolves inside it is refused at load exactly like
+    /// Go (`DirOverlaps`, `internal/profile/webui.go:350`).
+    #[test]
+    fn overlapping_ui_dir_is_refused_at_load() {
+        let home = temp_home("webui-overlap");
+        let cfg_dir = home.join(".config/castctl");
+        std::fs::create_dir_all(cfg_dir.join("ui")).unwrap();
+        let cfg = r#"{"default_profile":"x","profiles":{"x":{}},"webui":{"listen":"127.0.0.1:8317","token":"t","ui_dir":"ui"}}"#;
+        std::fs::write(cfg_dir.join("config.json"), cfg).unwrap();
+        let mut map = HashMap::new();
+        map.insert("HOME".to_string(), home.to_str().unwrap().to_string());
+        map.insert(
+            "XDG_CONFIG_HOME".to_string(),
+            cfg_dir.parent().unwrap().to_str().unwrap().to_string(),
+        );
+        let out = run_env(&["status"], map);
+        assert_eq!(out.code, 2);
+        assert_eq!(
+            out.stderr,
+            "castctl: profile: \"webui.ui_dir\" must not overlap the config directory\n"
+        );
     }
 
     #[test]

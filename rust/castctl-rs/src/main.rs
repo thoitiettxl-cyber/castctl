@@ -35,14 +35,18 @@ fn main() {
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     let outcome = castctl_cli::run(&args, None);
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
-    let _ = stdout.write_all(outcome.stdout.as_bytes());
-    let _ = stdout.write_all(&outcome.stdout_bytes);
-    let _ = stdout.flush();
-    let stderr = std::io::stderr();
-    let mut stderr = stderr.lock();
-    let _ = stderr.write_all(outcome.stderr.as_bytes());
-    let _ = stderr.flush();
+    // A streaming command already wrote its lines through
+    // `write_live`; replaying the buffered copy would duplicate them.
+    if !castctl_cli::live_output_written() {
+        let stdout = std::io::stdout();
+        let mut stdout = stdout.lock();
+        let _ = stdout.write_all(outcome.stdout.as_bytes());
+        let _ = stdout.write_all(&outcome.stdout_bytes);
+        let _ = stdout.flush();
+        let stderr = std::io::stderr();
+        let mut stderr = stderr.lock();
+        let _ = stderr.write_all(outcome.stderr.as_bytes());
+        let _ = stderr.flush();
+    }
     std::process::exit(outcome.code);
 }

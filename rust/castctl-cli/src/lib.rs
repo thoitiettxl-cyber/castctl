@@ -47,4 +47,4 @@ pub mod update;
 pub mod wait;
 pub mod watch;
 
-pub use run::{Outcome, VERSION, run};
+pub use run::{Outcome, VERSION, live_output_written, run};
